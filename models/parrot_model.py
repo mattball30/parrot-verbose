@@ -19,30 +19,55 @@ from torch.nn.modules.normalization import LayerNorm
 from tensorboardX import SummaryWriter
 from tqdm.auto import tqdm, trange
 from tqdm.contrib import tenumerate
-from transformers import Adafactor, AdamW, BertConfig, BertForSequenceClassification, get_constant_schedule, get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup, get_linear_schedule_with_warmup, get_polynomial_decay_schedule_with_warmup
+from transformers import (
+    Adafactor,
+    AdamW,
+    BertConfig,
+    BertForSequenceClassification,
+    get_constant_schedule,
+    get_constant_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
+    get_cosine_with_hard_restarts_schedule_with_warmup,
+    get_linear_schedule_with_warmup,
+    get_polynomial_decay_schedule_with_warmup,
+)
 from simpletransformers.config.model_args import ClassificationArgs
 from transformers.models.bert.configuration_bert import BertConfig
 from transformers.models.bert.modeling_bert import BertModel
 from simpletransformers.classification.classification_model import (
     MODELS_WITHOUT_SLIDING_WINDOW_SUPPORT,
-    MODELS_WITHOUT_CLASS_WEIGHTS_SUPPORT)
+    MODELS_WITHOUT_CLASS_WEIGHTS_SUPPORT,
+)
 from simpletransformers.classification.classification_utils import (
-    ClassificationDataset, )
+    ClassificationDataset,
+)
 import yaml
 
-from models.model_layer import PositionalEncoding, TokenEmbedding, TransformerDecoderLayer, TransformerDecoder
+from models.model_layer import (
+    PositionalEncoding,
+    TokenEmbedding,
+    TransformerDecoderLayer,
+    TransformerDecoder,
+)
 
-from models.utils import ConditionWithTempDataset, analyze_subgraph_attention_with_condition, load_dataset, print_args, viz_attention_reaction
+from models.utils import (
+    ConditionWithTempDataset,
+    analyze_subgraph_attention_with_condition,
+    load_dataset,
+    print_args,
+    viz_attention_reaction,
+)
 
 logger = logging.getLogger(__name__)
 
 try:
     import wandb
+
     wandb_available = True
 except ImportError:
     wandb_available = False
 
-BOS, EOS, PAD, MASK = '[BOS]', '[EOS]', '[PAD]', '[MASK]'
+BOS, EOS, PAD, MASK = "[BOS]", "[EOS]", "[PAD]", "[MASK]"
 
 
 class ParrotConditionModel(BertForSequenceClassification):
@@ -66,7 +91,7 @@ class ParrotConditionModel(BertForSequenceClassification):
         device = None
         dtype = None
 
-        if hasattr(config, 'output_attention'):
+        if hasattr(config, "output_attention"):
             self.output_attention = config.output_attention
         else:
             self.output_attention = False
@@ -74,7 +99,7 @@ class ParrotConditionModel(BertForSequenceClassification):
         self.bert = BertModel(config)
         activation = F.relu
         layer_norm_eps = 1e-5
-        factory_kwargs = {'device': device, 'dtype': dtype}
+        factory_kwargs = {"device": device, "dtype": dtype}
 
         decoder_layer = TransformerDecoderLayer(
             d_model,
@@ -86,29 +111,33 @@ class ParrotConditionModel(BertForSequenceClassification):
             batch_first=True,
             norm_first=False,
             **factory_kwargs,
-            output_attention=self.output_attention)
+            output_attention=self.output_attention,
+        )
         self.tgt_tok_emb = TokenEmbedding(tgt_vocab_size, emb_size=d_model)
-        self.positional_encoding = PositionalEncoding(emb_size=d_model,
-                                                      dropout=dropout)
+        self.positional_encoding = PositionalEncoding(emb_size=d_model, dropout=dropout)
         decoder_norm = LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
         self.decoder = TransformerDecoder(
             decoder_layer,
             num_decoder_layers,
             decoder_norm,
-            output_attention=self.output_attention)
+            output_attention=self.output_attention,
+        )
         self.generator = nn.Linear(d_model, tgt_vocab_size)
 
         self.loss_fn = torch.nn.CrossEntropyLoss(
-            ignore_index=config.condition_label_mapping[1][PAD])
+            ignore_index=config.condition_label_mapping[1][PAD]
+        )
         if self.use_temperature:
             self.memory_regression_layer = nn.Sequential(
                 nn.Linear(
-                    self.config.max_position_embeddings *
-                    self.config.hidden_size, d_model),
+                    self.config.max_position_embeddings * self.config.hidden_size,
+                    d_model,
+                ),
                 nn.ReLU(),
             )
             self.regression_layer1 = nn.Sequential(
-                nn.Linear(d_model * 5, d_model), nn.ReLU())
+                nn.Linear(d_model * 5, d_model), nn.ReLU()
+            )
             self.regression_layer2 = nn.Linear(2 * d_model, 1)
             self.reg_loss_fn = torch.nn.MSELoss()
 
@@ -125,38 +154,38 @@ class ParrotConditionModel(BertForSequenceClassification):
         temperature=None,
     ):
         if memory_key_padding_mask is None:
-            memory_key_padding_mask = (attention_mask == 0)
-        memory = self.bert(input_ids,
-                           attention_mask=attention_mask,
-                           token_type_ids=token_type_ids)[0]
+            memory_key_padding_mask = attention_mask == 0
+        memory = self.bert(
+            input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids
+        )[0]
         outs, attention_weights = self.decoder(
             self.positional_encoding(self.tgt_tok_emb(label_input)),
             memory,
             tgt_mask=label_mask,
             tgt_key_padding_mask=label_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask)
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
         logits = self.generator(outs)
 
         labels_out = labels[:, 1:]
-        loss = self.loss_fn(logits.reshape(-1, logits.shape[-1]),
-                            labels_out.reshape(-1))
+        loss = self.loss_fn(
+            logits.reshape(-1, logits.shape[-1]), labels_out.reshape(-1)
+        )
 
         if self.use_temperature:
             temp_memory = memory.reshape(
-                -1,
-                self.config.max_position_embeddings * self.config.hidden_size)
+                -1, self.config.max_position_embeddings * self.config.hidden_size
+            )
             temp_memory = self.memory_regression_layer(temp_memory)
 
             temp_out = outs[:, :-1, :]
-            temp_out = temp_out.reshape(-1,
-                                        temp_out.size(1) * temp_out.size(2))
+            temp_out = temp_out.reshape(-1, temp_out.size(1) * temp_out.size(2))
             temp_out = self.regression_layer1(temp_out)
 
             temp_out = torch.cat([temp_memory, temp_out], dim=1)
             temp_out = self.regression_layer2(temp_out)
 
-            loss_reg = self.reg_loss_fn(temp_out.reshape(-1),
-                                        temperature.reshape(-1))
+            loss_reg = self.reg_loss_fn(temp_out.reshape(-1), temperature.reshape(-1))
             # loss += 0.001*loss_reg
 
             return loss, logits, attention_weights, loss_reg, temp_out
@@ -170,12 +199,14 @@ class ParrotConditionModel(BertForSequenceClassification):
             self.positional_encoding(self.tgt_tok_emb(tgt)),
             memory,
             tgt_mask,
-            memory_key_padding_mask=memory_key_padding_mask)
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
         return decoder_output, attention_weightes
 
     def decode_temperature(self, memory, decoder_output):
         temp_memory = memory.reshape(
-            -1, self.config.max_position_embeddings * self.config.hidden_size)
+            -1, self.config.max_position_embeddings * self.config.hidden_size
+        )
         temp_memory = self.memory_regression_layer(temp_memory)
 
         # ==> (batch_size, n_condition, d_model) 没有结束符号
@@ -218,23 +249,24 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         self.args = self._load_model_args(model_name)
 
-        decoder_args = args['decoder_args']
+        decoder_args = args["decoder_args"]
         try:
-            self.condition_label_mapping = decoder_args[
-                'condition_label_mapping']
+            self.condition_label_mapping = decoder_args["condition_label_mapping"]
         except:
-            print('Warning: condition_label_mapping is not set!')
+            print("Warning: condition_label_mapping is not set!")
 
         if isinstance(args, dict):
             self.args.update_from_dict(args)
         elif isinstance(args, ClassificationArgs):
             self.args = args
 
-        if (model_type in MODELS_WITHOUT_SLIDING_WINDOW_SUPPORT
-                and self.args.sliding_window):
+        if (
+            model_type in MODELS_WITHOUT_SLIDING_WINDOW_SUPPORT
+            and self.args.sliding_window
+        ):
             raise ValueError(
-                "{} does not currently support sliding window".format(
-                    model_type))
+                "{} does not currently support sliding window".format(model_type)
+            )
 
         if self.args.thread_count:
             torch.set_num_threads(self.args.thread_count)
@@ -262,22 +294,20 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 tokenizer_class = tokenizer_type
 
         if model_name:
-            self.config = config_class.from_pretrained(model_name,
-                                                       **self.args.config)
+            self.config = config_class.from_pretrained(model_name, **self.args.config)
         else:
             self.config = config_class(**self.args.config, **kwargs)
         self.num_labels = self.config.num_labels
         self.config.update(decoder_args)
-        self.config.update({'use_temperature': args['use_temperature']})
-        if 'ignore_mismatched_sizes' in args:
-            kwargs.update(
-                {'ignore_mismatched_sizes': args['ignore_mismatched_sizes']})
-        if 'output_attention' in args:
-            self.config.update({'output_attention': args['output_attention']})
+        self.config.update({"use_temperature": args["use_temperature"]})
+        if "ignore_mismatched_sizes" in args:
+            kwargs.update({"ignore_mismatched_sizes": args["ignore_mismatched_sizes"]})
+        if "output_attention" in args:
+            self.config.update({"output_attention": args["output_attention"]})
         if model_type in MODELS_WITHOUT_CLASS_WEIGHTS_SUPPORT and weight is not None:
             raise ValueError(
-                "{} does not currently support class weights".format(
-                    model_type))
+                "{} does not currently support class weights".format(model_type)
+            )
         else:
             self.weight = weight
 
@@ -290,7 +320,8 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             else:
                 raise ValueError(
                     "'use_cuda' set to True when cuda is unavailable."
-                    " Make sure CUDA is available or set use_cuda=False.")
+                    " Make sure CUDA is available or set use_cuda=False."
+                )
         else:
             self.device = "cpu"
         if model_name:
@@ -304,10 +335,12 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     )
                 else:
                     self.model = model_class.from_pretrained(
-                        model_name, config=self.config, **kwargs)
+                        model_name, config=self.config, **kwargs
+                    )
             else:
                 quantized_weights = torch.load(
-                    os.path.join(model_name, "pytorch_model.bin"))
+                    os.path.join(model_name, "pytorch_model.bin")
+                )
                 if self.weight:
                     self.model = model_class.from_pretrained(
                         None,
@@ -317,29 +350,32 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     )
                 else:
                     self.model = model_class.from_pretrained(
-                        None, config=self.config, state_dict=quantized_weights)
+                        None, config=self.config, state_dict=quantized_weights
+                    )
 
             if self.args.dynamic_quantize:
                 self.model = torch.quantization.quantize_dynamic(
-                    self.model, {torch.nn.Linear}, dtype=torch.qint8)
+                    self.model, {torch.nn.Linear}, dtype=torch.qint8
+                )
             if self.args.quantized_model:
                 self.model.load_state_dict(quantized_weights)
             if self.args.dynamic_quantize:
                 self.args.quantized_model = True
         else:
             self.model = model_class(config=self.config)
-        if not hasattr(self.args, 'freeze_pretrain'):
+        if not hasattr(self.args, "freeze_pretrain"):
             self.args.freeze_pretrain = False
         if self.args.freeze_pretrain:
             train_layers = [
-                'tgt_tok_emb.embedding.weight', 'generator.weight',
-                'generator.bias'
+                "tgt_tok_emb.embedding.weight",
+                "generator.weight",
+                "generator.bias",
             ]
-            print(f'Frozen load parameters, training {train_layers}')
+            print(f"Frozen load parameters, training {train_layers}")
             for p in self.model.named_parameters():
                 if p[0] not in train_layers:
                     p[1].requires_grad = False
-        if not hasattr(self.args, 'loss_equilibrium_constant'):
+        if not hasattr(self.args, "loss_equilibrium_constant"):
             self.args.loss_equilibrium_constant = 0.001
         self.results = {}
 
@@ -356,14 +392,14 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         if tokenizer_name is None:
             tokenizer_name = model_name
-        if hasattr(self.args, 'vocab_path'):
+        if hasattr(self.args, "vocab_path"):
             pass
         else:
             self.args.vocab_path = None
         if tokenizer_name in [
-                "vinai/bertweet-base",
-                "vinai/bertweet-covid19-base-cased",
-                "vinai/bertweet-covid19-base-uncased",
+            "vinai/bertweet-base",
+            "vinai/bertweet-covid19-base-cased",
+            "vinai/bertweet-covid19-base-uncased",
         ]:
             self.tokenizer = tokenizer_class.from_pretrained(
                 tokenizer_name,
@@ -372,25 +408,25 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 **kwargs,
             )
         elif not self.args.vocab_path and not tokenizer_name in [
-                "vinai/bertweet-base",
-                "vinai/bertweet-covid19-base-cased",
-                "vinai/bertweet-covid19-base-uncased",
+            "vinai/bertweet-base",
+            "vinai/bertweet-covid19-base-cased",
+            "vinai/bertweet-covid19-base-uncased",
         ]:
             self.tokenizer = tokenizer_class.from_pretrained(
-                tokenizer_name,
-                do_lower_case=self.args.do_lower_case,
-                **kwargs)
+                tokenizer_name, do_lower_case=self.args.do_lower_case, **kwargs
+            )
 
         elif self.args.vocab_path:
-            self.tokenizer = tokenizer_class(self.args.vocab_path,
-                                             do_lower_case=False)
-            model_to_resize = self.model.module if hasattr(
-                self.model, "module") else self.model
+            self.tokenizer = tokenizer_class(self.args.vocab_path, do_lower_case=False)
+            model_to_resize = (
+                self.model.module if hasattr(self.model, "module") else self.model
+            )
             model_to_resize.resize_token_embeddings(len(self.tokenizer))
 
         if self.args.special_tokens_list:
-            self.tokenizer.add_tokens(self.args.special_tokens_list,
-                                      special_tokens=True)
+            self.tokenizer.add_tokens(
+                self.args.special_tokens_list, special_tokens=True
+            )
             self.model.resize_token_embeddings(len(self.tokenizer))
 
         self.args.model_name = model_name
@@ -401,7 +437,8 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         if model_type in ["camembert", "xlmroberta"]:
             warnings.warn(
                 f"use_multiprocessing automatically disabled as {model_type}"
-                " fails when using multiprocessing for feature conversion.")
+                " fails when using multiprocessing for feature conversion."
+            )
             self.args.use_multiprocessing = False
 
         if self.args.wandb_project and not wandb_available:
@@ -412,7 +449,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         if freeze_encoder:
             for name, param in self.model.named_parameters():
-                if 'classifier' in name:
+                if "classifier" in name:
                     continue
                 param.requires_grad = False
         elif freeze_all_but_one:
@@ -420,19 +457,21 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             for name, param in self.model.named_parameters():
                 if str(n_layers - 1) in name:
                     continue
-                elif 'classifier' in name:
+                elif "classifier" in name:
                     continue
-                elif 'pooler' in name:
+                elif "pooler" in name:
                     continue
                 param.requires_grad = False
 
-    def load_and_cache_examples(self,
-                                examples,
-                                evaluate=False,
-                                no_cache=False,
-                                multi_label=False,
-                                verbose=True,
-                                silent=False):
+    def load_and_cache_examples(
+        self,
+        examples,
+        evaluate=False,
+        no_cache=False,
+        multi_label=False,
+        verbose=True,
+        silent=False,
+    ):
 
         process_count = self.args.process_count
 
@@ -474,14 +513,16 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             )
         return dataset
 
-    def train_model(self,
-                    train_df,
-                    output_dir=None,
-                    show_running_loss=True,
-                    args=None,
-                    eval_df=None,
-                    verbose=True,
-                    **kwargs):
+    def train_model(
+        self,
+        train_df,
+        output_dir=None,
+        show_running_loss=True,
+        args=None,
+        eval_df=None,
+        verbose=True,
+        **kwargs,
+    ):
         if args:
             self.args.update_from_dict(args)
 
@@ -497,12 +538,17 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         if not output_dir:
             output_dir = self.args.output_dir
 
-        if (os.path.exists(output_dir) and os.listdir(output_dir)
-                and not self.args.overwrite_output_dir):
+        if (
+            os.path.exists(output_dir)
+            and os.listdir(output_dir)
+            and not self.args.overwrite_output_dir
+        ):
             raise ValueError(
                 "Output directory ({}) already exists and is not empty."
-                " Set overwrite_output_dir: True to automatically overwrite.".
-                format(output_dir))
+                " Set overwrite_output_dir: True to automatically overwrite.".format(
+                    output_dir
+                )
+            )
         self._move_model_to_device()
 
         # 数据集加载只保留一种加载方式，其余全部删除
@@ -511,11 +557,14 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             train_df["labels"].tolist(),
         )
 
-        train_dataset = self.load_and_cache_examples(train_examples,
-                                                     verbose=verbose,
-                                                     no_cache=True)
-        print('loaded train dataset {}'.format(
-            train_dataset.examples['input_ids'].shape[0]))
+        train_dataset = self.load_and_cache_examples(
+            train_examples, verbose=verbose, no_cache=True
+        )
+        print(
+            "loaded train dataset {}".format(
+                train_dataset.examples["input_ids"].shape[0]
+            )
+        )
         train_sampler = RandomSampler(train_dataset)
         train_dataloader = DataLoader(
             train_dataset,
@@ -536,27 +585,35 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         )
         self.save_model(model=self.model)
         if verbose:
-            logger.info(" Training of {} model complete. Saved to {}.".format(
-                self.args.model_type, output_dir))
+            logger.info(
+                " Training of {} model complete. Saved to {}.".format(
+                    self.args.model_type, output_dir
+                )
+            )
 
         return global_step, training_details
 
-    def train(self,
-              train_dataloader,
-              output_dir,
-              show_running_loss=True,
-              eval_df=None,
-              test_df=None,
-              verbose=True,
-              **kwargs):
+    def train(
+        self,
+        train_dataloader,
+        output_dir,
+        show_running_loss=True,
+        eval_df=None,
+        test_df=None,
+        verbose=True,
+        **kwargs,
+    ):
 
         model = self.model
         args = self.args
 
         tb_writer = SummaryWriter(logdir=args.tensorboard_dir)
 
-        t_total = (len(train_dataloader) // args.gradient_accumulation_steps *
-                   args.num_train_epochs)
+        t_total = (
+            len(train_dataloader)
+            // args.gradient_accumulation_steps
+            * args.num_train_epochs
+        )
 
         no_decay = ["bias", "LayerNorm.weight"]
 
@@ -593,33 +650,36 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             optimizer_grouped_parameters.append(group_nd)
 
         if not self.args.train_custom_parameters_only:
-            optimizer_grouped_parameters.extend([
-                {
-                    "params": [
-                        p for n, p in model.named_parameters()
-                        if n not in custom_parameter_names and not any(
-                            nd in n for nd in no_decay)
-                    ],
-                    "weight_decay":
-                    args.weight_decay,
-                },
-                {
-                    "params": [
-                        p for n, p in model.named_parameters()
-                        if n not in custom_parameter_names and any(
-                            nd in n for nd in no_decay)
-                    ],
-                    "weight_decay":
-                    0.0,
-                },
-            ])
+            optimizer_grouped_parameters.extend(
+                [
+                    {
+                        "params": [
+                            p
+                            for n, p in model.named_parameters()
+                            if n not in custom_parameter_names
+                            and not any(nd in n for nd in no_decay)
+                        ],
+                        "weight_decay": args.weight_decay,
+                    },
+                    {
+                        "params": [
+                            p
+                            for n, p in model.named_parameters()
+                            if n not in custom_parameter_names
+                            and any(nd in n for nd in no_decay)
+                        ],
+                        "weight_decay": 0.0,
+                    },
+                ]
+            )
 
         warmup_steps = math.ceil(t_total * args.warmup_ratio)
         if warmup_steps != 0:
             args.warmup_steps = warmup_steps
         else:
-            args.warmup_steps = (warmup_steps if args.warmup_steps == 0 else
-                                 args.warmup_steps)
+            args.warmup_steps = (
+                warmup_steps if args.warmup_steps == 0 else args.warmup_steps
+            )
 
         if args.optimizer == "AdamW":
             optimizer = AdamW(
@@ -643,15 +703,18 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             print("Using Adafactor for T5")
         else:
             raise ValueError(
-                "{} is not a valid optimizer class. Please use one of ('AdamW', 'Adafactor') instead."
-                .format(args.optimizer))
+                "{} is not a valid optimizer class. Please use one of ('AdamW', 'Adafactor') instead.".format(
+                    args.optimizer
+                )
+            )
 
         if args.scheduler == "constant_schedule":
             scheduler = get_constant_schedule(optimizer)
 
         elif args.scheduler == "constant_schedule_with_warmup":
             scheduler = get_constant_schedule_with_warmup(
-                optimizer, num_warmup_steps=args.warmup_steps)
+                optimizer, num_warmup_steps=args.warmup_steps
+            )
 
         elif args.scheduler == "linear_schedule_with_warmup":
             scheduler = get_linear_schedule_with_warmup(
@@ -686,8 +749,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             )
 
         else:
-            raise ValueError("{} is not a valid scheduler.".format(
-                args.scheduler))
+            raise ValueError("{} is not a valid scheduler.".format(args.scheduler))
         if args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
 
@@ -695,10 +757,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         training_progress_scores = None
         tr_loss, logging_loss = 0.0, 0.0
         model.zero_grad()
-        train_iterator = trange(int(args.num_train_epochs),
-                                desc="Epoch",
-                                disable=args.silent,
-                                mininterval=0)
+        train_iterator = trange(
+            int(args.num_train_epochs), desc="Epoch", disable=args.silent, mininterval=0
+        )
         epoch_number = 0
         best_eval_metric = None
         early_stopping_counter = 0
@@ -716,17 +777,17 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     checkpoint_suffix = checkpoint_suffix[-1]
                 global_step = int(checkpoint_suffix)
                 epochs_trained = global_step // (
-                    len(train_dataloader) // args.gradient_accumulation_steps)
+                    len(train_dataloader) // args.gradient_accumulation_steps
+                )
                 steps_trained_in_current_epoch = global_step % (
-                    len(train_dataloader) // args.gradient_accumulation_steps)
+                    len(train_dataloader) // args.gradient_accumulation_steps
+                )
 
                 logger.info(
                     "   Continuing training from checkpoint, will skip to saved global_step"
                 )
-                logger.info("   Continuing training from epoch %d",
-                            epochs_trained)
-                logger.info("   Continuing training from global step %d",
-                            global_step)
+                logger.info("   Continuing training from epoch %d", epochs_trained)
+                logger.info("   Continuing training from global step %d", global_step)
                 logger.info(
                     "   Will skip the first %d steps in the current epoch",
                     steps_trained_in_current_epoch,
@@ -734,10 +795,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             except ValueError:
                 logger.info("   Starting fine-tuning.")
         if args.evaluate_during_training:
-            training_progress_scores = self._create_training_progress_scores(
-                **kwargs)
+            training_progress_scores = self._create_training_progress_scores(**kwargs)
             if args.use_temperature:
-                training_progress_scores['eval_temp_mae'] = []
+                training_progress_scores["eval_temp_mae"] = []
 
         if args.wandb_project:
             if not wandb.setup().settings.sweep_id:
@@ -760,7 +820,8 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 epochs_trained -= 1
                 continue
             train_iterator.set_description(
-                f"Epoch {epoch_number + 1} of {args.num_train_epochs}")
+                f"Epoch {epoch_number + 1} of {args.num_train_epochs}"
+            )
             batch_iterator = tqdm(
                 train_dataloader,
                 desc=f"Running Epoch {epoch_number} of {args.num_train_epochs}",
@@ -814,8 +875,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     if self.args.fp16:
                         scaler.unscale_(optimizer)
                     if args.optimizer == "AdamW":
-                        torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                       args.max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), args.max_grad_norm
+                        )
 
                     if self.args.fp16:
                         scaler.step(optimizer)
@@ -828,9 +890,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
                     if args.logging_steps > 0 and global_step % args.logging_steps == 0:
                         # Log metrics
-                        tb_writer.add_scalar("lr",
-                                             scheduler.get_last_lr()[0],
-                                             global_step)
+                        tb_writer.add_scalar(
+                            "lr", scheduler.get_last_lr()[0], global_step
+                        )
                         tb_writer.add_scalar(
                             "loss",
                             (tr_loss - logging_loss) / args.logging_steps,
@@ -838,44 +900,47 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                         )
                         logging_loss = tr_loss
                         if args.wandb_project or self.is_sweeping:
-                            wandb.log({
-                                "Training loss": current_loss,
-                                "lr": scheduler.get_last_lr()[0],
-                                "global_step": global_step,
-                            })
+                            wandb.log(
+                                {
+                                    "Training loss": current_loss,
+                                    "lr": scheduler.get_last_lr()[0],
+                                    "global_step": global_step,
+                                }
+                            )
 
                     if args.save_steps > 0 and global_step % args.save_steps == 0:
                         # Save model checkpoint
                         output_dir_current = os.path.join(
-                            output_dir, "checkpoint-{}".format(global_step))
+                            output_dir, "checkpoint-{}".format(global_step)
+                        )
 
-                        self.save_model(output_dir_current,
-                                        optimizer,
-                                        scheduler,
-                                        model=model)
+                        self.save_model(
+                            output_dir_current, optimizer, scheduler, model=model
+                        )
 
                     if args.evaluate_during_training and (
-                            args.evaluate_during_training_steps > 0
-                            and global_step %
-                            args.evaluate_during_training_steps == 0):
+                        args.evaluate_during_training_steps > 0
+                        and global_step % args.evaluate_during_training_steps == 0
+                    ):
                         # Only evaluate when single GPU otherwise metrics may not average well
                         results = self.eval_model(
                             eval_df,
-                            verbose=verbose
-                            and args.evaluate_during_training_verbose,
+                            verbose=verbose and args.evaluate_during_training_verbose,
                             silent=args.evaluate_during_training_silent,
                             wandb_log=False,
                             **kwargs,
                         )
                         for key, value in results.items():
                             try:
-                                tb_writer.add_scalar("eval_{}".format(key),
-                                                     value, global_step)
+                                tb_writer.add_scalar(
+                                    "eval_{}".format(key), value, global_step
+                                )
                             except (NotImplementedError, AssertionError):
                                 pass
 
                         output_dir_current = os.path.join(
-                            output_dir, "checkpoint-{}".format(global_step))
+                            output_dir, "checkpoint-{}".format(global_step)
+                        )
 
                         if args.save_eval_checkpoints:
                             self.save_model(
@@ -885,29 +950,24 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                 model=model,
                                 results=results,
                             )
-                        training_progress_scores["global_step"].append(
-                            global_step)
-                        training_progress_scores["train_loss"].append(
-                            current_loss)
-                        training_progress_scores["train_ppl"].append(
-                            current_ppl)
+                        training_progress_scores["global_step"].append(global_step)
+                        training_progress_scores["train_loss"].append(current_loss)
+                        training_progress_scores["train_ppl"].append(current_ppl)
                         for key in results:
                             training_progress_scores[key].append(results[key])
                         report = pd.DataFrame(training_progress_scores)
                         report.to_csv(
-                            os.path.join(args.output_dir,
-                                         "training_progress_scores.csv"),
+                            os.path.join(
+                                args.output_dir, "training_progress_scores.csv"
+                            ),
                             index=False,
                         )
 
                         if args.wandb_project or self.is_sweeping:
-                            wandb.log(
-                                self._get_last_metrics(
-                                    training_progress_scores))
+                            wandb.log(self._get_last_metrics(training_progress_scores))
 
                         if not best_eval_metric:
-                            best_eval_metric = results[
-                                args.early_stopping_metric]
+                            best_eval_metric = results[args.early_stopping_metric]
                             self.save_model(
                                 args.best_model_dir,
                                 optimizer,
@@ -916,11 +976,11 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                 results=results,
                             )
                         if best_eval_metric and args.early_stopping_metric_minimize:
-                            if (best_eval_metric -
-                                    results[args.early_stopping_metric] >
-                                    args.early_stopping_delta):
-                                best_eval_metric = results[
-                                    args.early_stopping_metric]
+                            if (
+                                best_eval_metric - results[args.early_stopping_metric]
+                                > args.early_stopping_delta
+                            ):
+                                best_eval_metric = results[args.early_stopping_metric]
                                 self.save_model(
                                     args.best_model_dir,
                                     optimizer,
@@ -931,8 +991,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
-                                    if (early_stopping_counter <
-                                            args.early_stopping_patience):
+                                    if (
+                                        early_stopping_counter
+                                        < args.early_stopping_patience
+                                    ):
                                         early_stopping_counter += 1
                                         if verbose:
                                             logger.info(
@@ -949,21 +1011,22 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                             logger.info(
                                                 f" Patience of {args.early_stopping_patience} steps reached"
                                             )
-                                            logger.info(
-                                                " Training terminated.")
+                                            logger.info(" Training terminated.")
                                             train_iterator.close()
                                         return (
                                             global_step,
-                                            tr_loss / global_step if not self.
-                                            args.evaluate_during_training else
-                                            training_progress_scores,
+                                            (
+                                                tr_loss / global_step
+                                                if not self.args.evaluate_during_training
+                                                else training_progress_scores
+                                            ),
                                         )
                         else:
-                            if (results[args.early_stopping_metric] -
-                                    best_eval_metric >
-                                    args.early_stopping_delta):
-                                best_eval_metric = results[
-                                    args.early_stopping_metric]
+                            if (
+                                results[args.early_stopping_metric] - best_eval_metric
+                                > args.early_stopping_delta
+                            ):
+                                best_eval_metric = results[args.early_stopping_metric]
                                 self.save_model(
                                     args.best_model_dir,
                                     optimizer,
@@ -974,8 +1037,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                 early_stopping_counter = 0
                             else:
                                 if args.use_early_stopping:
-                                    if (early_stopping_counter <
-                                            args.early_stopping_patience):
+                                    if (
+                                        early_stopping_counter
+                                        < args.early_stopping_patience
+                                    ):
                                         early_stopping_counter += 1
                                         if verbose:
                                             logger.info(
@@ -992,30 +1057,28 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                             logger.info(
                                                 f" Patience of {args.early_stopping_patience} steps reached"
                                             )
-                                            logger.info(
-                                                " Training terminated.")
+                                            logger.info(" Training terminated.")
                                             train_iterator.close()
                                         return (
                                             global_step,
-                                            tr_loss / global_step if not self.
-                                            args.evaluate_during_training else
-                                            training_progress_scores,
+                                            (
+                                                tr_loss / global_step
+                                                if not self.args.evaluate_during_training
+                                                else training_progress_scores
+                                            ),
                                         )
                         model.train()
 
             epoch_number += 1
             output_dir_current = os.path.join(
-                output_dir,
-                "checkpoint-{}-epoch-{}".format(global_step, epoch_number))
+                output_dir, "checkpoint-{}-epoch-{}".format(global_step, epoch_number)
+            )
 
             if args.save_model_every_epoch or args.evaluate_during_training:
                 os.makedirs(output_dir_current, exist_ok=True)
 
             if args.save_model_every_epoch:
-                self.save_model(output_dir_current,
-                                optimizer,
-                                scheduler,
-                                model=model)
+                self.save_model(output_dir_current, optimizer, scheduler, model=model)
 
             if args.evaluate_during_training and args.evaluate_each_epoch:
                 results = self.eval_model(
@@ -1026,10 +1089,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     **kwargs,
                 )
 
-                self.save_model(output_dir_current,
-                                optimizer,
-                                scheduler,
-                                results=results)
+                self.save_model(
+                    output_dir_current, optimizer, scheduler, results=results
+                )
 
                 training_progress_scores["global_step"].append(global_step)
                 training_progress_scores["train_loss"].append(current_loss)
@@ -1038,8 +1100,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     training_progress_scores[key].append(results[key])
                 report = pd.DataFrame(training_progress_scores)
                 report.to_csv(
-                    os.path.join(args.output_dir,
-                                 "training_progress_scores.csv"),
+                    os.path.join(args.output_dir, "training_progress_scores.csv"),
                     index=False,
                 )
 
@@ -1058,8 +1119,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                         results=results,
                     )
                 if best_eval_metric and args.early_stopping_metric_minimize:
-                    if (best_eval_metric - results[args.early_stopping_metric]
-                            > args.early_stopping_delta):
+                    if (
+                        best_eval_metric - results[args.early_stopping_metric]
+                        > args.early_stopping_delta
+                    ):
                         best_eval_metric = results[args.early_stopping_metric]
                         self.save_model(
                             args.best_model_dir,
@@ -1070,8 +1133,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                         )
                         early_stopping_counter = 0
                     else:
-                        if (args.use_early_stopping
-                                and args.early_stopping_consider_epochs):
+                        if (
+                            args.use_early_stopping
+                            and args.early_stopping_consider_epochs
+                        ):
                             if early_stopping_counter < args.early_stopping_patience:
                                 early_stopping_counter += 1
                                 if verbose:
@@ -1093,13 +1158,17 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                     train_iterator.close()
                                 return (
                                     global_step,
-                                    tr_loss / global_step
-                                    if not self.args.evaluate_during_training
-                                    else training_progress_scores,
+                                    (
+                                        tr_loss / global_step
+                                        if not self.args.evaluate_during_training
+                                        else training_progress_scores
+                                    ),
                                 )
                 else:
-                    if (results[args.early_stopping_metric] - best_eval_metric
-                            > args.early_stopping_delta):
+                    if (
+                        results[args.early_stopping_metric] - best_eval_metric
+                        > args.early_stopping_delta
+                    ):
                         best_eval_metric = results[args.early_stopping_metric]
                         self.save_model(
                             args.best_model_dir,
@@ -1110,8 +1179,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                         )
                         early_stopping_counter = 0
                     else:
-                        if (args.use_early_stopping
-                                and args.early_stopping_consider_epochs):
+                        if (
+                            args.use_early_stopping
+                            and args.early_stopping_consider_epochs
+                        ):
                             if early_stopping_counter < args.early_stopping_patience:
                                 early_stopping_counter += 1
                                 if verbose:
@@ -1133,24 +1204,31 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                                     train_iterator.close()
                                 return (
                                     global_step,
-                                    tr_loss / global_step
-                                    if not self.args.evaluate_during_training
-                                    else training_progress_scores,
+                                    (
+                                        tr_loss / global_step
+                                        if not self.args.evaluate_during_training
+                                        else training_progress_scores
+                                    ),
                                 )
 
         return (
             global_step,
-            tr_loss / global_step if not self.args.evaluate_during_training
-            else training_progress_scores,
+            (
+                tr_loss / global_step
+                if not self.args.evaluate_during_training
+                else training_progress_scores
+            ),
         )
 
-    def eval_model(self,
-                   eval_df,
-                   output_dir=None,
-                   verbose=True,
-                   silent=False,
-                   wandb_log=True,
-                   **kwargs):
+    def eval_model(
+        self,
+        eval_df,
+        output_dir=None,
+        verbose=True,
+        silent=False,
+        wandb_log=True,
+        **kwargs,
+    ):
         if not output_dir:
             output_dir = self.args.output_dir
 
@@ -1171,14 +1249,16 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         return result
 
-    def evaluate(self,
-                 eval_df,
-                 output_dir,
-                 prefix="",
-                 verbose=True,
-                 silent=False,
-                 wandb_log=True,
-                 **kwargs):
+    def evaluate(
+        self,
+        eval_df,
+        output_dir,
+        prefix="",
+        verbose=True,
+        silent=False,
+        wandb_log=True,
+        **kwargs,
+    ):
 
         model = self.model
         args = self.args
@@ -1191,15 +1271,13 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             eval_df["labels"].tolist(),
         )
         os.makedirs(eval_output_dir, exist_ok=True)
-        eval_dataset = self.load_and_cache_examples(eval_examples,
-                                                    evaluate=True,
-                                                    verbose=verbose,
-                                                    silent=silent,
-                                                    no_cache=True)
+        eval_dataset = self.load_and_cache_examples(
+            eval_examples, evaluate=True, verbose=verbose, silent=silent, no_cache=True
+        )
         eval_sampler = SequentialSampler(eval_dataset)
-        eval_dataloader = DataLoader(eval_dataset,
-                                     sampler=eval_sampler,
-                                     batch_size=args.eval_batch_size)
+        eval_dataloader = DataLoader(
+            eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size
+        )
 
         if args.n_gpu > 1:
             model = torch.nn.DataParallel(model)
@@ -1220,11 +1298,12 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             from torch.cuda import amp
 
         for i, batch in enumerate(
-                tqdm(
-                    eval_dataloader,
-                    disable=args.silent or silent,
-                    desc="Running Evaluation",
-                )):
+            tqdm(
+                eval_dataloader,
+                disable=args.silent or silent,
+                desc="Running Evaluation",
+            )
+        ):
 
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
@@ -1253,11 +1332,15 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     eval_temp_mae += outputs[-1].item()
             nb_eval_steps += 1
             start_index = self.args.eval_batch_size * i
-            end_index = (start_index + self.args.eval_batch_size if i !=
-                         (n_batches - 1) else len(eval_dataset))
+            end_index = (
+                start_index + self.args.eval_batch_size
+                if i != (n_batches - 1)
+                else len(eval_dataset)
+            )
 
             out_label_ids[start_index:end_index] = (
-                inputs["labels"][:, 1:].detach().cpu().numpy())
+                inputs["labels"][:, 1:].detach().cpu().numpy()
+            )
 
         eval_loss = eval_loss / nb_eval_steps
         eval_ppl = np.exp(eval_loss)
@@ -1265,10 +1348,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             eval_reg_loss = eval_reg_loss / nb_eval_steps
             eval_loss += args.loss_equilibrium_constant * eval_reg_loss
             eval_temp_mae = eval_temp_mae / len(eval_dataset)
-            results['eval_temp_mae'] = eval_temp_mae
+            results["eval_temp_mae"] = eval_temp_mae
 
-        results['eval_loss'] = eval_loss
-        results['eval_ppl'] = eval_ppl
+        results["eval_loss"] = eval_loss
+        results["eval_ppl"] = eval_ppl
 
         return results
 
@@ -1287,17 +1370,20 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         return training_progress_scores
 
     def _generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones(
-            (sz, sz), device=self.device)) == 1).transpose(0, 1)
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(
-            mask == 1, float(0.0))
+        mask = (torch.triu(torch.ones((sz, sz), device=self.device)) == 1).transpose(
+            0, 1
+        )
+        mask = (
+            mask.float()
+            .masked_fill(mask == 0, float("-inf"))
+            .masked_fill(mask == 1, float(0.0))
+        )
         return mask
 
     def _get_inputs_dict(self, batch):
         if isinstance(batch[0], dict):
             inputs = {
-                key: value.squeeze(1).to(self.device)
-                for key, value in batch[0].items()
+                key: value.squeeze(1).to(self.device) for key, value in batch[0].items()
             }
             if not self.args.use_temperature:
                 inputs["labels"] = batch[1].to(self.device)
@@ -1314,14 +1400,14 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 "labels": batch[3],
             }
 
-        inputs['label_input'] = inputs['labels'][:, :-1]
-        labels_seq_len = inputs['label_input'].shape[1]
-        inputs['label_mask'] = self._generate_square_subsequent_mask(
-            labels_seq_len)
+        inputs["label_input"] = inputs["labels"][:, :-1]
+        labels_seq_len = inputs["label_input"].shape[1]
+        inputs["label_mask"] = self._generate_square_subsequent_mask(labels_seq_len)
         # inputs['label_padding_mask'] = (inputs['label_input'] == self.condition_label_mapping[1]['[PAD]']).transpose(0, 1)
-        inputs['label_padding_mask'] = (
-            inputs['label_input'] == self.condition_label_mapping[1]['[PAD]'])
-        inputs['memory_key_padding_mask'] = (inputs['attention_mask'] == 0)
+        inputs["label_padding_mask"] = (
+            inputs["label_input"] == self.condition_label_mapping[1]["[PAD]"]
+        )
+        inputs["memory_key_padding_mask"] = inputs["attention_mask"] == 0
         # del inputs['labels']
         return inputs
 
@@ -1335,8 +1421,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
             loss = loss_fct(logits.view(-1, num_labels), labels.view(-1))
         if args.use_temperature:
-            batch_temp_mae = torch.abs(inputs["temperature"] -
-                                       outputs[4]).sum()
+            batch_temp_mae = torch.abs(inputs["temperature"] - outputs[4]).sum()
             return (loss, *outputs[1:], batch_temp_mae)
         return (loss, *outputs[1:])
 
@@ -1346,13 +1431,18 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         succ_translate = []
         translate_quene = Queue()
 
-        memory_key_padding_mask = inputs['memory_key_padding_mask']
-        del inputs['memory_key_padding_mask']
+        memory_key_padding_mask = inputs["memory_key_padding_mask"]
+        del inputs["memory_key_padding_mask"]
         memory = model.bert(**inputs)[0]
-        ys = torch.ones(memory.size(0),
-                        1).fill_(start_symbol).type(torch.long).to(self.device)
-        cumul_score = torch.ones(memory.size(0)).type(torch.float).to(
-            self.device).view(-1, 1)
+        ys = (
+            torch.ones(memory.size(0), 1)
+            .fill_(start_symbol)
+            .type(torch.long)
+            .to(self.device)
+        )
+        cumul_score = (
+            torch.ones(memory.size(0)).type(torch.float).to(self.device).view(-1, 1)
+        )
         ys = ys.transpose(0, 1)
         cumul_score = cumul_score.transpose(0, 1)
         step_number = 0
@@ -1360,28 +1450,25 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             translate_quene.put((ys, cumul_score, step_number, None))
         else:
             translate_quene.put((ys, cumul_score, step_number))
-        while (not translate_quene.empty()):
+        while not translate_quene.empty():
             if self.args.use_temperature:
-                ys, cumul_score, step_number, previous_out = translate_quene.get(
-                )
+                ys, cumul_score, step_number, previous_out = translate_quene.get()
             else:
                 ys, cumul_score, step_number = translate_quene.get()
             if ys.size(0) >= max_len:
                 if self.args.use_temperature:
-                    succ_translate.append(
-                        (ys, cumul_score, step_number, previous_out))
+                    succ_translate.append((ys, cumul_score, step_number, previous_out))
                 else:
                     succ_translate.append((ys, cumul_score, step_number))
                 continue
             ys = ys.transpose(0, 1)
             cumul_score = cumul_score.transpose(0, 1)
-            tgt_mask = (self._generate_square_subsequent_mask(ys.size(1)).type(
-                torch.bool)).to(self.device)
+            tgt_mask = (
+                self._generate_square_subsequent_mask(ys.size(1)).type(torch.bool)
+            ).to(self.device)
             out, _ = model.decode(
-                ys,
-                memory,
-                tgt_mask,
-                memory_key_padding_mask=memory_key_padding_mask)
+                ys, memory, tgt_mask, memory_key_padding_mask=memory_key_padding_mask
+            )
             pred = model.generator(out[:, -1])
             prob = torch.softmax(pred, dim=1)
             if self.args.use_temperature:
@@ -1391,7 +1478,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             elif isinstance(beam, dict):
                 next_scores, next_words = prob.topk(beam[step_number])
             else:
-                raise ValueError('beam should be  \'int\' or \'dict\'.')
+                raise ValueError("beam should be  'int' or 'dict'.")
             step_number += 1
             for i in range(next_words.size(1)):
                 _ys = torch.cat([ys, next_words[:, i].unsqueeze(1)], dim=1)
@@ -1399,10 +1486,10 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 _cumul_score = cumul_score * next_scores[:, i].unsqueeze(1)
                 if self.args.use_temperature:
                     step2translate[step_number].append(
-                        (_ys, _cumul_score, step_number, previous_out))
+                        (_ys, _cumul_score, step_number, previous_out)
+                    )
                 else:
-                    step2translate[step_number].append(
-                        (_ys, _cumul_score, step_number))
+                    step2translate[step_number].append((_ys, _cumul_score, step_number))
             if isinstance(beam, int):
                 thread_number = beam if step_number == 1 else beam * beam
             elif isinstance(beam, dict):
@@ -1412,79 +1499,97 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     thread_number *= beam[i]
                 # thread_number = beam[step_number-1] if step_number == 1 else beam[step_number-1] * beam[step_number]
             else:
-                raise ValueError('beam should be  \'int\' or \'dict\'.')
+                raise ValueError("beam should be  'int' or 'dict'.")
             if len(step2translate[step_number]) == thread_number:
                 put_list = step2translate[step_number]
-                _ys_cat = torch.cat([x[0].unsqueeze(0) for x in put_list],
-                                    dim=0)  # --> (beam, batch_size, tgt_len)
+                _ys_cat = torch.cat(
+                    [x[0].unsqueeze(0) for x in put_list], dim=0
+                )  # --> (beam, batch_size, tgt_len)
                 # --> (beam, tgt_len, batch_size)
                 _ys_cat = _ys_cat.transpose(1, 2)
-                _cumul_score_cat = torch.cat([x[1] for x in put_list],
-                                             dim=1)  # --> (batch_size, beam)
+                _cumul_score_cat = torch.cat(
+                    [x[1] for x in put_list], dim=1
+                )  # --> (batch_size, beam)
                 _cumul_score_cat = _cumul_score_cat.transpose(
-                    0, 1)  # --> (beam, batch_size)
+                    0, 1
+                )  # --> (beam, batch_size)
                 _ys_cat_sorted = torch.zeros_like(_ys_cat)
                 _cumul_score_cat_sorted = torch.zeros_like(_cumul_score_cat)
                 if self.args.use_temperature:
                     _one_step_previous_outs = torch.cat(
-                        [x[3].unsqueeze(0) for x in put_list], dim=0)
+                        [x[3].unsqueeze(0) for x in put_list], dim=0
+                    )
                     _one_step_previous_outs_sorted = torch.zeros_like(
-                        _one_step_previous_outs)
+                        _one_step_previous_outs
+                    )
                 for j in range(_cumul_score_cat.size(1)):
                     dim_cumul_score_sorted, _idx = _cumul_score_cat[:, j].topk(
-                        thread_number)
+                        thread_number
+                    )
                     _ys_cat_sorted[:, :, j] = _ys_cat[_idx, :, j]
                     _cumul_score_cat_sorted[:, j] = dim_cumul_score_sorted
                     if self.args.use_temperature:
-                        _one_step_previous_outs_sorted[:,
-                                                       j] = _one_step_previous_outs[
-                                                           _idx, j]
+                        _one_step_previous_outs_sorted[:, j] = _one_step_previous_outs[
+                            _idx, j
+                        ]
                 if isinstance(beam, int):
                     for n in range(beam):
                         if self.args.use_temperature:
                             translate_quene.put(
-                                (_ys_cat_sorted[n],
-                                 _cumul_score_cat_sorted[n].unsqueeze(0),
-                                 step_number,
-                                 _one_step_previous_outs_sorted[n]))
+                                (
+                                    _ys_cat_sorted[n],
+                                    _cumul_score_cat_sorted[n].unsqueeze(0),
+                                    step_number,
+                                    _one_step_previous_outs_sorted[n],
+                                )
+                            )
                         else:
                             translate_quene.put(
-                                (_ys_cat_sorted[n],
-                                 _cumul_score_cat_sorted[n].unsqueeze(0),
-                                 step_number))
+                                (
+                                    _ys_cat_sorted[n],
+                                    _cumul_score_cat_sorted[n].unsqueeze(0),
+                                    step_number,
+                                )
+                            )
                 elif isinstance(beam, dict):
                     for n in range(thread_number):
                         if self.args.use_temperature:
                             translate_quene.put(
-                                (_ys_cat_sorted[n],
-                                 _cumul_score_cat_sorted[n].unsqueeze(0),
-                                 step_number,
-                                 _one_step_previous_outs_sorted[n]))
+                                (
+                                    _ys_cat_sorted[n],
+                                    _cumul_score_cat_sorted[n].unsqueeze(0),
+                                    step_number,
+                                    _one_step_previous_outs_sorted[n],
+                                )
+                            )
                         else:
                             translate_quene.put(
-                                (_ys_cat_sorted[n],
-                                 _cumul_score_cat_sorted[n].unsqueeze(0),
-                                 step_number))
+                                (
+                                    _ys_cat_sorted[n],
+                                    _cumul_score_cat_sorted[n].unsqueeze(0),
+                                    step_number,
+                                )
+                            )
                 else:
-                    raise ValueError('beam should be  \'int\' or \'dict\'.')
-        _tgt_tokens = torch.cat([x[0].unsqueeze(0) for x in succ_translate],
-                                dim=0)
+                    raise ValueError("beam should be  'int' or 'dict'.")
+        _tgt_tokens = torch.cat([x[0].unsqueeze(0) for x in succ_translate], dim=0)
         _cumul_scores = torch.cat([x[1] for x in succ_translate])
         tgt_tokens = torch.zeros_like(_tgt_tokens)
         cumul_scores = torch.zeros_like(_cumul_scores)
         if self.args.use_temperature:
             _previous_outs = torch.cat(
-                [x[3].unsqueeze(0) for x in succ_translate], dim=0)
+                [x[3].unsqueeze(0) for x in succ_translate], dim=0
+            )
             previous_outs = torch.zeros_like(_previous_outs)
         for j in range(_cumul_scores.size(1)):
             if isinstance(beam, int):
-                dim_cumul_scores_sorted, _idx = _cumul_score_cat[:,
-                                                                 j].topk(beam)
+                dim_cumul_scores_sorted, _idx = _cumul_score_cat[:, j].topk(beam)
             elif isinstance(beam, dict):
                 dim_cumul_scores_sorted, _idx = _cumul_score_cat[:, j].topk(
-                    thread_number)
+                    thread_number
+                )
             else:
-                raise ValueError('beam should be  \'int\' or \'dict\'.')
+                raise ValueError("beam should be  'int' or 'dict'.")
             tgt_tokens[:, :, j] = _ys_cat[_idx, :, j]
             cumul_scores[:, j] = dim_cumul_scores_sorted
 
@@ -1510,21 +1615,19 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         return condition_list
 
     def _get_accuracy_for_one(
-            self,
-            one_pred,
-            one_ground_truth,
-            topk_get=[1, 3, 5, 10, 15],
-            condition_to_calculate=['c1', 's1', 's2', 'r1', 'r2']):
+        self,
+        one_pred,
+        one_ground_truth,
+        topk_get=[1, 3, 5, 10, 15],
+        condition_to_calculate=["c1", "s1", "s2", "r1", "r2"],
+    ):
 
-        condition_item2cols = {'c1': 0, 's1': 1, 's2': 2, 'r1': 3, 'r2': 4}
+        condition_item2cols = {"c1": 0, "s1": 1, "s2": 2, "r1": 3, "r2": 4}
 
-        calculate_cols = [
-            condition_item2cols[x] for x in condition_to_calculate
-        ]
+        calculate_cols = [condition_item2cols[x] for x in condition_to_calculate]
 
         repeat_number = one_pred.size(0)
-        hit_mat = one_ground_truth.unsqueeze(0).repeat(repeat_number,
-                                                       1) == one_pred
+        hit_mat = one_ground_truth.unsqueeze(0).repeat(repeat_number, 1) == one_pred
         hit_mat = hit_mat[:, calculate_cols]
         overall_hit_mat = hit_mat.sum(1) == hit_mat.size(1)
         topk_hit_df = pd.DataFrame()
@@ -1546,15 +1649,16 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         return topk_hit_df
 
     def _calculate_batch_topk_hit(
-            self,
-            batch_preds,
-            batch_ground_truth,
-            topk_get=[1, 3, 5, 10, 15],
-            condition_to_calculate=['c1', 's1', 's2', 'r1', 'r2']):
-        '''
+        self,
+        batch_preds,
+        batch_ground_truth,
+        topk_get=[1, 3, 5, 10, 15],
+        condition_to_calculate=["c1", "s1", "s2", "r1", "r2"],
+    ):
+        """
         batch_pred                         <-- tgt_tokens_list
         batch_ground_truth                 <-- inputs['labels']
-        '''
+        """
         batch_preds = torch.tensor(batch_preds)[:, :, 1:].to(self.device)
         batch_ground_truth = batch_ground_truth[:, 1:-1]
 
@@ -1565,23 +1669,26 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 batch_preds[idx],
                 batch_ground_truth[idx],
                 topk_get=topk_get,
-                condition_to_calculate=condition_to_calculate)
+                condition_to_calculate=condition_to_calculate,
+            )
             one_batch_topk_acc_mat += topk_hit_df.values
         return one_batch_topk_acc_mat
 
     def condition_beam_search(
-            self,
-            test_df,
-            output_dir,
-            beam,
-            n_best=15,
-            test_batch_size=8,
-            verbose=True,
-            silent=False,
-            calculate_topk_accuracy=False,
-            topk_get=[1, 3, 5, 10, 15],
-            topk_results_fname='topk_accuracy.csv',
-            condition_to_calculate=['c1', 's1', 's2', 'r1', 'r2']):
+        self,
+        test_df,
+        output_dir,
+        beam,
+        n_best=15,
+        test_batch_size=8,
+        verbose=True,
+        silent=False,
+        calculate_topk_accuracy=False,
+        topk_get=[1, 3, 5, 10, 15],
+        topk_results_fname="topk_accuracy.csv",
+        condition_to_calculate=["c1", "s1", "s2", "r1", "r2"],
+        verbose_output=False,
+    ):
         self._move_model_to_device()
         model = self.model
         args = self.args
@@ -1594,11 +1701,13 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             test_df["labels"].tolist(),
         )
 
-        test_dataset = self.load_and_cache_examples(test_examples,
-                                                    verbose=verbose,
-                                                    no_cache=True)
-        print('loaded test dataset {}'.format(
-            test_dataset.examples['input_ids'].shape[0]))
+        test_dataset = self.load_and_cache_examples(
+            test_examples, verbose=verbose, no_cache=True
+        )
+        print(
+            "loaded test dataset {}".format(test_dataset.examples["input_ids"].shape[0])
+        )
+
         test_sampler = SequentialSampler(test_dataset)
         test_dataloader = DataLoader(
             test_dataset,
@@ -1622,27 +1731,36 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         pred_conditions = []
         gt_temperatures = []
         pred_temperatures = []
+
+        if verbose_output:
+            gt_conditions = []
+            canonical_rxns = []
+
         topk_acc_df = None
         test_temp_mae = 0.0
         if calculate_topk_accuracy:
             topk_acc_mat = np.zeros((len(condition_to_calculate) + 1, 5))
+
         for i, batch in enumerate(
-                tqdm(
-                    test_dataloader,
-                    disable=args.silent or silent,
-                    desc="Running Testing Beam Search",
-                )):
+            tqdm(
+                test_dataloader,
+                disable=args.silent or silent,
+                desc="Running Testing Beam Search",
+            )
+        ):
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
                 encoder_input_keys = [
-                    'input_ids', 'attention_mask', 'token_type_ids',
-                    'memory_key_padding_mask'
+                    "input_ids",
+                    "attention_mask",
+                    "token_type_ids",
+                    "memory_key_padding_mask",
                 ]
                 _inputs = {key: inputs[key] for key in encoder_input_keys}
-                search_outputs = self.translate_beam_search(model,
-                                                            _inputs,
-                                                            max_len=label_len,
-                                                            beam=beam)
+
+                search_outputs = self.translate_beam_search(
+                    model, _inputs, max_len=label_len, beam=beam
+                )
                 tgt_tokens = search_outputs[0]
                 scores = search_outputs[1]
                 scores = torch.log(scores)
@@ -1650,75 +1768,122 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     memory, outputs_hidden = search_outputs[2]
                     closest_outputs = outputs_hidden[0]
                     closest_temp = model.decode_temperature(
-                        memory=memory, decoder_output=closest_outputs)
+                        memory=memory, decoder_output=closest_outputs
+                    )
                     pred_temperatures += closest_temp.view(-1).tolist()
-                    gt_temperatures += inputs['temperature'].view(-1).tolist()
+                    gt_temperatures += inputs["temperature"].view(-1).tolist()
                     one_batch_test_temp_mae = torch.abs(
-                        closest_temp.view(-1) -
-                        inputs['temperature'].view(-1)).sum()
+                        closest_temp.view(-1) - inputs["temperature"].view(-1)
+                    ).sum()
                     test_temp_mae += one_batch_test_temp_mae.item()
             tgt_tokens_list = [
-                tgt_tokens[:, :, i].tolist()
-                for i in range(tgt_tokens.size(-1))
+                tgt_tokens[:, :, i].tolist() for i in range(tgt_tokens.size(-1))
             ]
-            scores_list = [
-                scores[:, i].tolist() for i in range(scores.size(1))
-            ]
+            scores_list = [scores[:, i].tolist() for i in range(scores.size(1))]
 
             if calculate_topk_accuracy:
                 one_batch_topk_acc_mat = self._calculate_batch_topk_hit(
                     tgt_tokens_list,
-                    inputs['labels'],
-                    condition_to_calculate=condition_to_calculate)
+                    inputs["labels"],
+                    condition_to_calculate=condition_to_calculate,
+                )
                 topk_acc_mat += one_batch_topk_acc_mat
 
             batch_results = []
-            for one_group_tgt_tokens, one_group_scores in zip(
-                    tgt_tokens_list, scores_list):
+            for idx, (one_group_tgt_tokens, one_group_scores) in enumerate(
+                zip(tgt_tokens_list, scores_list)
+            ):
                 one_group_sentence = []
-                for tgt_tokens, score in zip(one_group_tgt_tokens,
-                                             one_group_scores):
-                    one_group_sentence.append(
-                        (self._idx2condition(tgt_tokens), score))
+                for tgt_tokens, score in zip(one_group_tgt_tokens, one_group_scores):
+                    one_group_sentence.append((self._idx2condition(tgt_tokens), score))
                 batch_results.append(one_group_sentence[:n_best])
+
+                # If we want verbose output, then also get the ground truth conditions, and reaction:
+                if verbose_output:
+                    gt_cond_tokens = inputs["labels"][idx].tolist()
+                    # Ignore the last token, which is the EOS token
+                    gt_condition = self._idx2condition(gt_cond_tokens[:-1])
+                    gt_conditions.append(gt_condition)
+
+                    gt_rxn_tokens = inputs["input_ids"][idx]
+                    gt_rxn = self.tokenizer.decode(gt_rxn_tokens)
+                    gt_rxn = (
+                        gt_rxn.replace("[PAD]", "")
+                        .replace("[CLS]", "")
+                        .replace("[SEP]", "")
+                        .replace(" ", "")
+                    )
+                    gt_rxn_str = "".join(gt_rxn)
+                    canonical_rxns.append(gt_rxn_str)
+
             pred_conditions += batch_results
-        assert len(
-            pred_conditions) == test_dataset.examples['input_ids'].shape[0]
+
+        assert len(pred_conditions) == test_dataset.examples["input_ids"].shape[0]
+
+        if verbose_output:
+            columns = [
+                "canonical_rxn",
+                "pred_number",
+                "gt_conditions",
+                "pred_conditions",
+            ]
+
+            rows = [
+                [
+                    canonical_rxns[i],
+                    nth_prediction + 1,
+                    ",".join(gt_conditions[i]),
+                    ",".join(pred_conditions[i][nth_prediction][0]),
+                ]
+                for i in tqdm(
+                    range(len(pred_conditions)), desc="Writing verbose output"
+                )
+                for nth_prediction in range(n_best)
+            ]
+
+            verbose_df = pd.DataFrame.from_records(rows, columns=columns)
+
+            verbose_df.to_csv(os.path.join(test_output_dir, "verbose_output.csv"))
 
         if calculate_topk_accuracy:
             from sklearn.metrics import r2_score
+
             topk_acc_mat /= len(test_dataloader.dataset)
             topk_acc_df = pd.DataFrame(topk_acc_mat)
-            topk_acc_df.columns = [f'top-{k} accuracy' for k in topk_get]
+            topk_acc_df.columns = [f"top-{k} accuracy" for k in topk_get]
             # topk_acc_df.index = ['c1', 's1', 's2', 'r1', 'r2', 'overall']
-            topk_acc_df.index = condition_to_calculate + ['overall']
+            topk_acc_df.index = condition_to_calculate + ["overall"]
             if self.args.use_temperature:
-                assert len(pred_temperatures
-                           ) == test_dataset.examples['input_ids'].shape[0]
-                test_temp_mae = test_temp_mae / test_dataset.examples[
-                    'input_ids'].shape[0]
+                assert (
+                    len(pred_temperatures)
+                    == test_dataset.examples["input_ids"].shape[0]
+                )
+                test_temp_mae = (
+                    test_temp_mae / test_dataset.examples["input_ids"].shape[0]
+                )
                 test_temp_r2 = r2_score(gt_temperatures, pred_temperatures)
-                topk_acc_df.loc['closest_pred_temp_mae'] = test_temp_mae
-                topk_acc_df.loc['closest_pred_temp_r2'] = test_temp_r2
-            topk_acc_df.to_csv(
-                os.path.join(test_output_dir, topk_results_fname))
+                topk_acc_df.loc["closest_pred_temp_mae"] = test_temp_mae
+                topk_acc_df.loc["closest_pred_temp_r2"] = test_temp_r2
+            topk_acc_df.to_csv(os.path.join(test_output_dir, topk_results_fname))
 
             return pred_conditions, pred_temperatures, topk_acc_df
+
         return pred_conditions, pred_temperatures
 
     def condition_beam_search_supercls(
-            self,
-            test_df,
-            output_dir,
-            beam,
-            n_best=15,
-            test_batch_size=8,
-            verbose=True,
-            silent=False,
-            calculate_topk_accuracy=False,
-            topk_get=[1, 3, 5, 10, 15],
-            topk_results_fname='topk_accuracy.csv',
-            condition_to_calculate=['c1', 's1', 's2', 'r1', 'r2']):
+        self,
+        test_df,
+        output_dir,
+        beam,
+        n_best=15,
+        test_batch_size=8,
+        verbose=True,
+        silent=False,
+        calculate_topk_accuracy=False,
+        topk_get=[1, 3, 5, 10, 15],
+        topk_results_fname="topk_accuracy.csv",
+        condition_to_calculate=["c1", "s1", "s2", "r1", "r2"],
+    ):
         self._move_model_to_device()
         model = self.model
         args = self.args
@@ -1731,11 +1896,12 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             test_df["labels"].tolist(),
         )
 
-        test_dataset = self.load_and_cache_examples(test_examples,
-                                                    verbose=verbose,
-                                                    no_cache=True)
-        print('loaded test dataset {}'.format(
-            test_dataset.examples['input_ids'].shape[0]))
+        test_dataset = self.load_and_cache_examples(
+            test_examples, verbose=verbose, no_cache=True
+        )
+        print(
+            "loaded test dataset {}".format(test_dataset.examples["input_ids"].shape[0])
+        )
         test_sampler = SequentialSampler(test_dataset)
         test_dataloader = DataLoader(
             test_dataset,
@@ -1764,22 +1930,24 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         if calculate_topk_accuracy:
             topk_acc_mat = np.zeros((len(condition_to_calculate) + 1, 5))
         for i, batch in enumerate(
-                tqdm(
-                    test_dataloader,
-                    disable=args.silent or silent,
-                    desc="Running Testing Beam Search",
-                )):
+            tqdm(
+                test_dataloader,
+                disable=args.silent or silent,
+                desc="Running Testing Beam Search",
+            )
+        ):
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
                 encoder_input_keys = [
-                    'input_ids', 'attention_mask', 'token_type_ids',
-                    'memory_key_padding_mask'
+                    "input_ids",
+                    "attention_mask",
+                    "token_type_ids",
+                    "memory_key_padding_mask",
                 ]
                 _inputs = {key: inputs[key] for key in encoder_input_keys}
-                search_outputs = self.translate_beam_search(model,
-                                                            _inputs,
-                                                            max_len=label_len,
-                                                            beam=beam)
+                search_outputs = self.translate_beam_search(
+                    model, _inputs, max_len=label_len, beam=beam
+                )
                 tgt_tokens = search_outputs[0]
                 scores = search_outputs[1]
                 scores = torch.log(scores)
@@ -1787,20 +1955,18 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                     memory, outputs_hidden = search_outputs[2]
                     closest_outputs = outputs_hidden[0]
                     closest_temp = model.decode_temperature(
-                        memory=memory, decoder_output=closest_outputs)
+                        memory=memory, decoder_output=closest_outputs
+                    )
                     pred_temperatures += closest_temp.view(-1).tolist()
-                    gt_temperatures += inputs['temperature'].view(-1).tolist()
+                    gt_temperatures += inputs["temperature"].view(-1).tolist()
                     one_batch_test_temp_mae = torch.abs(
-                        closest_temp.view(-1) -
-                        inputs['temperature'].view(-1)).sum()
+                        closest_temp.view(-1) - inputs["temperature"].view(-1)
+                    ).sum()
                     test_temp_mae += one_batch_test_temp_mae.item()
             tgt_tokens_list = [
-                tgt_tokens[:, :, i].tolist()
-                for i in range(tgt_tokens.size(-1))
+                tgt_tokens[:, :, i].tolist() for i in range(tgt_tokens.size(-1))
             ]
-            scores_list = [
-                scores[:, i].tolist() for i in range(scores.size(1))
-            ]
+            scores_list = [scores[:, i].tolist() for i in range(scores.size(1))]
 
             if calculate_topk_accuracy:
 
@@ -1815,88 +1981,84 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 for one_sample_results in tgt_tokens_list:
                     one_sample_results_supercls = []
                     for pred in one_sample_results:
-                        pred_tokens = [
-                            self.condition_label_mapping[0][x] for x in pred
-                        ]
+                        pred_tokens = [self.condition_label_mapping[0][x] for x in pred]
                         pred_supercls = [
-                            self.condition_label_mapping[1][
-                                pred_tokens[0]],  # BOS
-                            self.condition_label_mapping[1][
-                                pred_tokens[1]],  # c1
-                            change_token_idx(pred_tokens[2],
-                                             self.uspto_solvent_to_cls_idx) +
-                            500,  # s1
-                            change_token_idx(pred_tokens[3],
-                                             self.uspto_solvent_to_cls_idx) +
-                            500,  # s2
-                            change_token_idx(pred_tokens[4],
-                                             self.uspto_reagent_to_cls_idx) +
-                            1000,  # r1
-                            change_token_idx(pred_tokens[5],
-                                             self.uspto_reagent_to_cls_idx) +
-                            1000,  # r2
+                            self.condition_label_mapping[1][pred_tokens[0]],  # BOS
+                            self.condition_label_mapping[1][pred_tokens[1]],  # c1
+                            change_token_idx(
+                                pred_tokens[2], self.uspto_solvent_to_cls_idx
+                            )
+                            + 500,  # s1
+                            change_token_idx(
+                                pred_tokens[3], self.uspto_solvent_to_cls_idx
+                            )
+                            + 500,  # s2
+                            change_token_idx(
+                                pred_tokens[4], self.uspto_reagent_to_cls_idx
+                            )
+                            + 1000,  # r1
+                            change_token_idx(
+                                pred_tokens[5], self.uspto_reagent_to_cls_idx
+                            )
+                            + 1000,  # r2
                         ]
                         one_sample_results_supercls.append(pred_supercls)
-                    tgt_tokens_list_supercls.append(
-                        one_sample_results_supercls)
+                    tgt_tokens_list_supercls.append(one_sample_results_supercls)
                 labels_supercls = []
-                for one_label in inputs['labels'].tolist():
-                    one_tokens = [
-                        self.condition_label_mapping[0][x] for x in one_label
-                    ]
+                for one_label in inputs["labels"].tolist():
+                    one_tokens = [self.condition_label_mapping[0][x] for x in one_label]
                     one_label_supercls = [
                         self.condition_label_mapping[1][one_tokens[0]],  # BOS
                         self.condition_label_mapping[1][one_tokens[1]],  # c1
-                        self.uspto_solvent_to_cls_idx[one_tokens[2]] +
-                        500,  # s1
-                        self.uspto_solvent_to_cls_idx[one_tokens[3]] +
-                        500,  # s2
-                        self.uspto_reagent_to_cls_idx[one_tokens[4]] +
-                        1000,  # r1
-                        self.uspto_reagent_to_cls_idx[one_tokens[5]] +
-                        1000,  # r1
+                        self.uspto_solvent_to_cls_idx[one_tokens[2]] + 500,  # s1
+                        self.uspto_solvent_to_cls_idx[one_tokens[3]] + 500,  # s2
+                        self.uspto_reagent_to_cls_idx[one_tokens[4]] + 1000,  # r1
+                        self.uspto_reagent_to_cls_idx[one_tokens[5]] + 1000,  # r1
                         self.condition_label_mapping[1][one_tokens[6]],  # EOS
                     ]
                     labels_supercls.append(one_label_supercls)
 
-                labels_supercls = torch.tensor(labels_supercls,
-                                               device=inputs['labels'].device)
+                labels_supercls = torch.tensor(
+                    labels_supercls, device=inputs["labels"].device
+                )
 
                 one_batch_topk_acc_mat = self._calculate_batch_topk_hit(
                     tgt_tokens_list_supercls,
                     labels_supercls,
-                    condition_to_calculate=condition_to_calculate)
+                    condition_to_calculate=condition_to_calculate,
+                )
                 topk_acc_mat += one_batch_topk_acc_mat
 
             batch_results = []
             for one_group_tgt_tokens, one_group_scores in zip(
-                    tgt_tokens_list, scores_list):
+                tgt_tokens_list, scores_list
+            ):
                 one_group_sentence = []
-                for tgt_tokens, score in zip(one_group_tgt_tokens,
-                                             one_group_scores):
-                    one_group_sentence.append(
-                        (self._idx2condition(tgt_tokens), score))
+                for tgt_tokens, score in zip(one_group_tgt_tokens, one_group_scores):
+                    one_group_sentence.append((self._idx2condition(tgt_tokens), score))
                 batch_results.append(one_group_sentence[:n_best])
             pred_conditions += batch_results
-        assert len(
-            pred_conditions) == test_dataset.examples['input_ids'].shape[0]
+        assert len(pred_conditions) == test_dataset.examples["input_ids"].shape[0]
 
         if calculate_topk_accuracy:
             from sklearn.metrics import r2_score
+
             topk_acc_mat /= len(test_dataloader.dataset)
             topk_acc_df = pd.DataFrame(topk_acc_mat)
-            topk_acc_df.columns = [f'top-{k} accuracy' for k in topk_get]
-            topk_acc_df.index = condition_to_calculate + ['overall']
+            topk_acc_df.columns = [f"top-{k} accuracy" for k in topk_get]
+            topk_acc_df.index = condition_to_calculate + ["overall"]
             if self.args.use_temperature:
-                assert len(pred_temperatures
-                           ) == test_dataset.examples['input_ids'].shape[0]
-                test_temp_mae = test_temp_mae / test_dataset.examples[
-                    'input_ids'].shape[0]
+                assert (
+                    len(pred_temperatures)
+                    == test_dataset.examples["input_ids"].shape[0]
+                )
+                test_temp_mae = (
+                    test_temp_mae / test_dataset.examples["input_ids"].shape[0]
+                )
                 test_temp_r2 = r2_score(gt_temperatures, pred_temperatures)
-                topk_acc_df.loc['closest_pred_temp_mae'] = test_temp_mae
-                topk_acc_df.loc['closest_pred_temp_r2'] = test_temp_r2
-            topk_acc_df.to_csv(
-                os.path.join(test_output_dir, topk_results_fname))
+                topk_acc_df.loc["closest_pred_temp_mae"] = test_temp_mae
+                topk_acc_df.loc["closest_pred_temp_r2"] = test_temp_r2
+            topk_acc_df.to_csv(os.path.join(test_output_dir, topk_results_fname))
 
             return pred_conditions, pred_temperatures, topk_acc_df
         return pred_conditions, pred_temperatures
@@ -1904,10 +2066,12 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
     def greedy_search_one_sample_with_attn(self, rxn):
         start_symbol = self.condition_label_mapping[1][BOS]
         start_symbol = self.condition_label_mapping[1][BOS]
-        example_df = pd.DataFrame({
-            'text': [rxn],
-            'labels': [[0, 0, 0, 0, 0]],
-        })
+        example_df = pd.DataFrame(
+            {
+                "text": [rxn],
+                "labels": [[0, 0, 0, 0, 0]],
+            }
+        )
         tokenizer = self.tokenizer
         input_tokens = tokenizer.tokenize(rxn)
         self._move_model_to_device()
@@ -1920,9 +2084,9 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             example_df["text"].astype(str).tolist(),
             example_df["labels"].tolist(),
         )
-        input_dataset = self.load_and_cache_examples(test_examples,
-                                                     verbose=False,
-                                                     no_cache=True)
+        input_dataset = self.load_and_cache_examples(
+            test_examples, verbose=False, no_cache=True
+        )
         test_sampler = SequentialSampler(input_dataset)
         test_dataloader = DataLoader(
             input_dataset,
@@ -1935,37 +2099,42 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         for i, batch in enumerate(test_dataloader):
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
-                encoder_input_keys = [
-                    'input_ids', 'attention_mask', 'token_type_ids'
-                ]
-                memory_key_padding_mask = inputs['memory_key_padding_mask']
+                encoder_input_keys = ["input_ids", "attention_mask", "token_type_ids"]
+                memory_key_padding_mask = inputs["memory_key_padding_mask"]
                 _inputs = {key: inputs[key] for key in encoder_input_keys}
                 # _inputs['memory_key_padding_mask'] = (_inputs['attention_mask'] == 0)
                 memory = model.bert(**_inputs)[0]
                 # memory = memory[:,:,:len(input_tokens)+2]
-                ys = torch.ones(memory.size(0), 1).fill_(start_symbol).type(
-                    torch.long).to(self.device)
+                ys = (
+                    torch.ones(memory.size(0), 1)
+                    .fill_(start_symbol)
+                    .type(torch.long)
+                    .to(self.device)
+                )
                 for i in range(6):
-                    tgt_mask = (self._generate_square_subsequent_mask(
-                        ys.size(1)).type(torch.bool)).to(self.device)
+                    tgt_mask = (
+                        self._generate_square_subsequent_mask(ys.size(1)).type(
+                            torch.bool
+                        )
+                    ).to(self.device)
                     out, attention_weights = model.decode(
                         ys,
                         memory,
                         tgt_mask,
-                        memory_key_padding_mask=memory_key_padding_mask)
+                        memory_key_padding_mask=memory_key_padding_mask,
+                    )
                     pred = model.generator(out[:, -1])
                     prob = torch.softmax(pred, dim=1)
                     _, next_word = prob.topk(1)
                     next_word = next_word.item()
                     ys = torch.cat(
-                        [ys, torch.ones(1, 1).type_as(ys).fill_(next_word)],
-                        dim=1)
+                        [ys, torch.ones(1, 1).type_as(ys).fill_(next_word)], dim=1
+                    )
         predicted_conditions = [
             self.condition_label_mapping[0][x] for x in ys.tolist()[0]
         ][1:-1]
         attention_weights = [
-            x[:, :, :, :len(input_tokens) + 2]
-            for x in attention_weights['cross_attn']
+            x[:, :, :, : len(input_tokens) + 2] for x in attention_weights["cross_attn"]
         ]
         # for i in range(attention_weights.size(0)):
         #     for j in range(attention_weights.size(1)):
@@ -1978,65 +2147,80 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         return predicted_conditions, attention_weights, input_tokens
 
-    def view_condition_bert_attentions(self,
-                                       rxn,
-                                       heatmap=True,
-                                       fig_save_path=None,
-                                       figsize=(46, 20),
-                                       output_prediction=False,
-                                       output_demo_fname=None,
-                                       show_attention_fig=False,
-                                       mean_attn=False):
+    def view_condition_bert_attentions(
+        self,
+        rxn,
+        heatmap=True,
+        fig_save_path=None,
+        figsize=(46, 20),
+        output_prediction=False,
+        output_demo_fname=None,
+        show_attention_fig=False,
+        mean_attn=False,
+    ):
         from models.utils import condition_bert_head_view
         from models.utils import condition_bert_head_heatmap
 
-        predicted_conditions, attention_weights, input_tokens = self.greedy_search_one_sample_with_attn(
-            rxn)
+        predicted_conditions, attention_weights, input_tokens = (
+            self.greedy_search_one_sample_with_attn(rxn)
+        )
         # attention_weights = [x['cross_attn'] for x in attention_weights]
         if output_demo_fname:
             if not os.path.exists(os.path.dirname(output_demo_fname)):
                 os.makedirs(os.path.dirname(output_demo_fname))
             attention_weights_numpy = [x.tolist() for x in attention_weights]
-            demo_data = (attention_weights_numpy, input_tokens,
-                         predicted_conditions, rxn)
-            with open(output_demo_fname, 'wb') as f:
+            demo_data = (
+                attention_weights_numpy,
+                input_tokens,
+                predicted_conditions,
+                rxn,
+            )
+            with open(output_demo_fname, "wb") as f:
                 pickle.dump(demo_data, f)
 
         if show_attention_fig:
-            viz_attention_reaction(attention_weights=attention_weights,
-                                   src_tokens=input_tokens,
-                                   tgt_tokens=predicted_conditions,
-                                   rxn_smiles=rxn,
-                                   mean_attn=mean_attn)
+            viz_attention_reaction(
+                attention_weights=attention_weights,
+                src_tokens=input_tokens,
+                tgt_tokens=predicted_conditions,
+                rxn_smiles=rxn,
+                mean_attn=mean_attn,
+            )
 
         if heatmap:
-            condition_bert_head_heatmap(attention_weights,
-                                        src_tokens=input_tokens,
-                                        tgt_tokens=predicted_conditions,
-                                        fig_save_path=fig_save_path,
-                                        figsize=figsize)
+            condition_bert_head_heatmap(
+                attention_weights,
+                src_tokens=input_tokens,
+                tgt_tokens=predicted_conditions,
+                fig_save_path=fig_save_path,
+                figsize=figsize,
+            )
 
             if output_prediction:
                 return None, predicted_conditions
             else:
                 return None, None
         else:
-            html = condition_bert_head_view(attention_weights,
-                                            src_tokens=input_tokens,
-                                            tgt_tokens=predicted_conditions,
-                                            html_action='return')
+            html = condition_bert_head_view(
+                attention_weights,
+                src_tokens=input_tokens,
+                tgt_tokens=predicted_conditions,
+                html_action="return",
+            )
             if output_prediction:
                 return html, predicted_conditions
             else:
                 return html, None
 
-    def greedy_search_batch_with_attn(self,
-                                      test_df,
-                                      test_batch_size=8,
-                                      normalize=False,
-                                      transpose_end=True,
-                                      silent=False,
-                                      block_encoder_self_attn=False):
+    def greedy_search_batch_with_attn(
+        self,
+        test_df,
+        test_batch_size=8,
+        normalize=False,
+        transpose_end=True,
+        silent=False,
+        block_encoder_self_attn=False,
+    ):
 
         self._move_model_to_device()
         model = self.model
@@ -2048,13 +2232,15 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             test_df["labels"].tolist(),
         )
 
-        test_dataset = self.load_and_cache_examples(test_examples,
-                                                    verbose=False,
-                                                    no_cache=True,
-                                                    silent=silent)
+        test_dataset = self.load_and_cache_examples(
+            test_examples, verbose=False, no_cache=True, silent=silent
+        )
         if not silent:
-            print('loaded test dataset {}'.format(
-                test_dataset.examples['input_ids'].shape[0]))
+            print(
+                "loaded test dataset {}".format(
+                    test_dataset.examples["input_ids"].shape[0]
+                )
+            )
         test_sampler = SequentialSampler(test_dataset)
         test_dataloader = DataLoader(
             test_dataset,
@@ -2088,49 +2274,60 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         test_decoder_self_attention_weights = []
         model.eval()
         for batch in tqdm(
-                test_dataloader,
-                desc="Running Testing Greedy Search",
-                disable=silent
+            test_dataloader, desc="Running Testing Greedy Search", disable=silent
         ):
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
-                encoder_input_keys = [
-                    'input_ids', 'attention_mask', 'token_type_ids'
-                ]
-                memory_key_padding_mask = inputs['memory_key_padding_mask']
+                encoder_input_keys = ["input_ids", "attention_mask", "token_type_ids"]
+                memory_key_padding_mask = inputs["memory_key_padding_mask"]
                 _inputs = {key: inputs[key] for key in encoder_input_keys}
                 # _inputs['memory_key_padding_mask'] = (_inputs['attention_mask'] == 0)
                 encoder_outputs = model.bert(**_inputs, output_attentions=True)
-                memory, encoder_self_attention_weights = encoder_outputs.last_hidden_state, encoder_outputs.attentions
+                memory, encoder_self_attention_weights = (
+                    encoder_outputs.last_hidden_state,
+                    encoder_outputs.attentions,
+                )
 
                 if not block_encoder_self_attn:
                     # Encoder Self Attention (Reacton2Reaction)
                     batch_encoder_self_attention_weights = torch.cat(
-                        [x.unsqueeze(1) for x in encoder_self_attention_weights],
-                        dim=1).to(torch.device('cpu'))
+                        [x.unsqueeze(1) for x in encoder_self_attention_weights], dim=1
+                    ).to(torch.device("cpu"))
                     batch_encoder_self_attention_weights = [
                         x.squeeze()
-                        for x in torch.chunk(batch_encoder_self_attention_weights,
-                                            inputs['input_ids'].shape[0],
-                                            dim=0)
+                        for x in torch.chunk(
+                            batch_encoder_self_attention_weights,
+                            inputs["input_ids"].shape[0],
+                            dim=0,
+                        )
                     ]
-                    test_encoder_self_attention_weights.extend(batch_encoder_self_attention_weights)
+                    test_encoder_self_attention_weights.extend(
+                        batch_encoder_self_attention_weights
+                    )
 
                 # memory = memory[:,:,:len(input_tokens)+2]
-                ys = torch.ones(memory.size(0), 1).fill_(start_symbol).type(
-                    torch.long).to(self.device)
+                ys = (
+                    torch.ones(memory.size(0), 1)
+                    .fill_(start_symbol)
+                    .type(torch.long)
+                    .to(self.device)
+                )
                 for i in range(6):
-                    tgt_mask = (self._generate_square_subsequent_mask(
-                        ys.size(1)).type(torch.bool)).to(self.device)
+                    tgt_mask = (
+                        self._generate_square_subsequent_mask(ys.size(1)).type(
+                            torch.bool
+                        )
+                    ).to(self.device)
                     out, attention_weights = model.decode(
                         ys,
                         memory,
                         tgt_mask,
-                        memory_key_padding_mask=memory_key_padding_mask
+                        memory_key_padding_mask=memory_key_padding_mask,
                     )  # attention_weights --> (batch_size, nhead, tgt_size, source_size)
-                    cross_attention_weights = attention_weights['cross_attn']
+                    cross_attention_weights = attention_weights["cross_attn"]
                     decoder_self_attention_weights = attention_weights[
-                        'decoder_self_attn']
+                        "decoder_self_attn"
+                    ]
                     pred = model.generator(out[:, -1])
                     prob = torch.softmax(pred, dim=1)
                     _, next_word = prob.topk(1)
@@ -2140,52 +2337,55 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
                 # Cross Attention (RXN2Condition)
                 batch_cross_attention_weights = torch.cat(
-                    [x.unsqueeze(1) for x in cross_attention_weights],
-                    dim=1).to(torch.device('cpu'))
+                    [x.unsqueeze(1) for x in cross_attention_weights], dim=1
+                ).to(torch.device("cpu"))
                 batch_cross_attention_weights = [
                     x.squeeze()
-                    for x in torch.chunk(batch_cross_attention_weights,
-                                         inputs['input_ids'].shape[0],
-                                         dim=0)
+                    for x in torch.chunk(
+                        batch_cross_attention_weights,
+                        inputs["input_ids"].shape[0],
+                        dim=0,
+                    )
                 ]
-                test_cross_attention_weights.extend(
-                    batch_cross_attention_weights)
+                test_cross_attention_weights.extend(batch_cross_attention_weights)
 
                 # Decoder Self Attention (Condition2Condition)
                 batch_decoder_self_attention_weights = torch.cat(
-                    [x.unsqueeze(1) for x in decoder_self_attention_weights],
-                    dim=1).to(torch.device('cpu'))
+                    [x.unsqueeze(1) for x in decoder_self_attention_weights], dim=1
+                ).to(torch.device("cpu"))
                 batch_decoder_self_attention_weights = [
                     x.squeeze()
-                    for x in torch.chunk(batch_decoder_self_attention_weights,
-                                         inputs['input_ids'].shape[0],
-                                         dim=0)
+                    for x in torch.chunk(
+                        batch_decoder_self_attention_weights,
+                        inputs["input_ids"].shape[0],
+                        dim=0,
+                    )
                 ]
                 test_decoder_self_attention_weights.extend(
-                    batch_decoder_self_attention_weights)
+                    batch_decoder_self_attention_weights
+                )
 
         predicted_conditions = []
         for one_prediction in tqdm(
-                predicted_labels,
-                desc="Converting Labels to Conditions",
-                disable=silent
+            predicted_labels, desc="Converting Labels to Conditions", disable=silent
         ):
-            predicted_conditions.append([
-                self.condition_label_mapping[0][x]
-                for x in one_prediction[1:-1]
-            ])
+            predicted_conditions.append(
+                [self.condition_label_mapping[0][x] for x in one_prediction[1:-1]]
+            )
 
         # test_attention_weights_rm_masked_attn --> list(n_sample * (nlayer, nhead, source_size, tgt_size))
 
         test_cross_attention_weights_rm_masked_attn = []
         for input_tokens, cross_attention_weights in tqdm(
-                zip(input_tokens_list, test_cross_attention_weights),
-                desc='Remove Masked Cross Attentions',
-                total=len(input_tokens_list),
-                disable=silent):
+            zip(input_tokens_list, test_cross_attention_weights),
+            desc="Remove Masked Cross Attentions",
+            total=len(input_tokens_list),
+            disable=silent,
+        ):
 
-            cross_attention_weights = cross_attention_weights[:, :, :, :len(
-                input_tokens) + 2]
+            cross_attention_weights = cross_attention_weights[
+                :, :, :, : len(input_tokens) + 2
+            ]
             cross_attention_weights = cross_attention_weights[:, :, :-1, 1:-1]
 
             if normalize:
@@ -2199,119 +2399,133 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 )
             if transpose_end:
                 cross_attention_weights = cross_attention_weights.transpose(3, 2)
-            test_cross_attention_weights_rm_masked_attn.append(
-                cross_attention_weights)
-            
+            test_cross_attention_weights_rm_masked_attn.append(cross_attention_weights)
+
         test_encoder_self_attention_weights_rm_masked_attn = []
         for input_tokens, self_attention_weights in tqdm(
-                zip(input_tokens_list, test_encoder_self_attention_weights),
-                desc='Remove Masked Encoder Self Attentions',
-                total=len(input_tokens_list),
-                disable=silent):
+            zip(input_tokens_list, test_encoder_self_attention_weights),
+            desc="Remove Masked Encoder Self Attentions",
+            total=len(input_tokens_list),
+            disable=silent,
+        ):
 
-            self_attention_weights = self_attention_weights[:, :, :len(
-                input_tokens) + 2, :len(
-                input_tokens) + 2]
+            self_attention_weights = self_attention_weights[
+                :, :, : len(input_tokens) + 2, : len(input_tokens) + 2
+            ]
             test_encoder_self_attention_weights_rm_masked_attn.append(
-                self_attention_weights)
-
+                self_attention_weights
+            )
 
         test_decoder_self_attention_weights_rm_spec = []
         for pred, self_attention_weights in tqdm(
-                zip(predicted_conditions, test_decoder_self_attention_weights),
-                desc='Handle Decoder Self Attentions',
-                total=len(input_tokens_list),
-                disable=silent):
+            zip(predicted_conditions, test_decoder_self_attention_weights),
+            desc="Handle Decoder Self Attentions",
+            total=len(input_tokens_list),
+            disable=silent,
+        ):
 
             self_attention_weights = self_attention_weights.numpy()
             self_attention_weights = self_attention_weights[:, :, :, :]
 
-            test_decoder_self_attention_weights_rm_spec.append(
-                self_attention_weights)
-
-            
+            test_decoder_self_attention_weights_rm_spec.append(self_attention_weights)
 
         attention_weights = {
-            'cross_attn': test_cross_attention_weights_rm_masked_attn,
-            'decoder_self_attn': test_decoder_self_attention_weights_rm_spec,
-            'encoder_self_attn': test_encoder_self_attention_weights_rm_masked_attn,
+            "cross_attn": test_cross_attention_weights_rm_masked_attn,
+            "decoder_self_attn": test_decoder_self_attention_weights_rm_spec,
+            "encoder_self_attn": test_encoder_self_attention_weights_rm_masked_attn,
         }
 
         return predicted_conditions, attention_weights, input_tokens_list
 
     def analyze_function_group_attention_with_condition(
-            self,
-            test_df,
-            test_batch_size=8,
-            subgraph_fpath=None,
-            analysis_results_save_path=None):
+        self,
+        test_df,
+        test_batch_size=8,
+        subgraph_fpath=None,
+        analysis_results_save_path=None,
+    ):
         if os.path.exists(analysis_results_save_path):
-            print('Reading calculated analysis results...')
+            print("Reading calculated analysis results...")
             with open(
-                    os.path.join(analysis_results_save_path,
-                                 'score_map_condition_type_dict.pkl'),
-                    'rb') as f:
+                os.path.join(
+                    analysis_results_save_path, "score_map_condition_type_dict.pkl"
+                ),
+                "rb",
+            ) as f:
                 score_map_condition_type_dict = pickle.load(f)
             return score_map_condition_type_dict
-        print('Analysing function group attention with condition...')
+        print("Analysing function group attention with condition...")
         if subgraph_fpath == None:
             raise ValueError()
         subgraph_data_df = pd.read_csv(subgraph_fpath, header=None)
-        subgraph_data_df.columns = ['smiles', 'rxn_split_count']
-        subgraph_smiles = subgraph_data_df['smiles'].tolist()
+        subgraph_data_df.columns = ["smiles", "rxn_split_count"]
+        subgraph_smiles = subgraph_data_df["smiles"].tolist()
         print(subgraph_smiles)
 
-        predicted_conditions, attention_weights, input_tokens_list = self.greedy_search_batch_with_attn(
-            test_df=test_df, test_batch_size=test_batch_size)
-        test_attention_weights_rm_masked_attn = attention_weights['cross_attn']
+        predicted_conditions, attention_weights, input_tokens_list = (
+            self.greedy_search_batch_with_attn(
+                test_df=test_df, test_batch_size=test_batch_size
+            )
+        )
+        test_attention_weights_rm_masked_attn = attention_weights["cross_attn"]
         rxn_smiles = test_df["text"].astype(str).tolist()
 
         score_map_condition_type_dict = analyze_subgraph_attention_with_condition(
-            input_tokens_list, rxn_smiles, predicted_conditions,
-            test_attention_weights_rm_masked_attn, subgraph_smiles)
+            input_tokens_list,
+            rxn_smiles,
+            predicted_conditions,
+            test_attention_weights_rm_masked_attn,
+            subgraph_smiles,
+        )
         # analysis_results_save_path = './data/bert_condition_data/USPTO_condition_frag_analysis_results.pkl'
         if analysis_results_save_path is not None:
             if not os.path.exists(analysis_results_save_path):
                 os.makedirs(analysis_results_save_path)
             with open(
-                    os.path.join(analysis_results_save_path,
-                                 'score_map_condition_type_dict.pkl'),
-                    'wb') as f:
+                os.path.join(
+                    analysis_results_save_path, "score_map_condition_type_dict.pkl"
+                ),
+                "wb",
+            ) as f:
                 pickle.dump(score_map_condition_type_dict, f)
             with open(
-                    os.path.join(analysis_results_save_path,
-                                 'model_config.pkl'), 'wb') as f:
+                os.path.join(analysis_results_save_path, "model_config.pkl"), "wb"
+            ) as f:
                 pickle.dump(self.args, f)
-            subgraph_data_df.to_csv(os.path.join(analysis_results_save_path,
-                                                 'subgraph.csv'),
-                                    index=False)
+            subgraph_data_df.to_csv(
+                os.path.join(analysis_results_save_path, "subgraph.csv"), index=False
+            )
 
         return score_map_condition_type_dict
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
-    config_file = './data/bert_condition_data/config_debug.yaml'
+    config_file = "./data/bert_condition_data/config_debug.yaml"
     print_args(config_file)
     config = yaml.load(open(config_file, "r"), Loader=yaml.FullLoader)
-    model_args = config['model_args']
-    model_args.update({'output_attention': True})
-    dataset_args = config['dataset_args']
+    model_args = config["model_args"]
+    model_args.update({"output_attention": True})
+    dataset_args = config["dataset_args"]
     dataset_df, condition_label_mapping = load_dataset(**dataset_args)
-    model_args['decoder_args'].update({
-        'tgt_vocab_size':
-        len(condition_label_mapping[0]),
-        'condition_label_mapping':
-        condition_label_mapping
-    })
-    model = ParrotConditionPredictionModel("bert",
-                                           model_args['best_model_dir'],
-                                           args=model_args,
-                                           use_cuda=torch.cuda.is_available())
+    model_args["decoder_args"].update(
+        {
+            "tgt_vocab_size": len(condition_label_mapping[0]),
+            "condition_label_mapping": condition_label_mapping,
+        }
+    )
+    model = ParrotConditionPredictionModel(
+        "bert",
+        model_args["best_model_dir"],
+        args=model_args,
+        use_cuda=torch.cuda.is_available(),
+    )
 
-    model.view_condition_bert_attentions(rxn=dataset_df['canonical_rxn'][0],
-                                         heatmap=True,
-                                         show_attention_fig=True,
-                                         mean_attn=True)
+    model.view_condition_bert_attentions(
+        rxn=dataset_df["canonical_rxn"][0],
+        heatmap=True,
+        show_attention_fig=True,
+        mean_attn=True,
+    )
     # model.view_condition_bert_attentions(
     #     input_rxn_smiles=dataset_df['canonical_rxn'][0], heatmap=False)

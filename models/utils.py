@@ -15,7 +15,10 @@ from torch.utils.data import Dataset
 from bertviz.util import format_attention, num_layers
 import pkg_resources
 from tqdm import tqdm
-from simpletransformers.classification.classification_utils import preprocess_data_multiprocessing, preprocess_data
+from simpletransformers.classification.classification_utils import (
+    preprocess_data_multiprocessing,
+    preprocess_data,
+)
 from multiprocessing import Pool
 from typing import List, Tuple
 from tqdm.auto import tqdm
@@ -31,42 +34,61 @@ from preprocess_script.uspto_script.utils import canonicalize_smiles
 logger = logging.getLogger(__name__)
 
 BAD_TOKS = ["[CLS]", "[SEP]"]  # Default Bad Tokens
-CONDITION_TYPE = ['c1', 's1', 's2', 'r1', 'r2']
+CONDITION_TYPE = ["c1", "s1", "s2", "r1", "r2"]
+
+
 def caonicalize_rxn_smiles(rxn_smiles):
     try:
-        react, _, prod = rxn_smiles.split('>')
+        react, _, prod = rxn_smiles.split(">")
         react, prod = [canonicalize_smiles(x) for x in [react, prod]]
-        if '' in [react, prod]:
-            return ''
-        return f'{react}>>{prod}'
+        if "" in [react, prod]:
+            return ""
+        return f"{react}>>{prod}"
     except:
-        return ''
+        return ""
 
 
-def get_output_results(input_rxn_smiles, pred_conditions, pred_temperatures, output_dataframe=True):
+def get_output_results(
+    input_rxn_smiles, pred_conditions, pred_temperatures, output_dataframe=True
+):
     output_results = []
     output_df = pd.DataFrame()
     for idx, one_pred in enumerate(pred_conditions):
         conditions, scores = zip(*one_pred)
         one_df = pd.DataFrame(conditions)
-        one_df.columns = [
-            'catalyst1', 'solvent1', 'solvent2', 'reagent1', 'reagent2'
+        one_df.columns = ["catalyst1", "solvent1", "solvent2", "reagent1", "reagent2"]
+        one_df["scores"] = scores
+        one_df["rxn_smiles"] = [input_rxn_smiles[idx]] + [""] * (len(conditions) - 1)
+        one_df["top-k"] = [f"top-{x+1}" for x in range(len(conditions))]
+        one_df = one_df[
+            [
+                "rxn_smiles",
+                "top-k",
+                "catalyst1",
+                "solvent1",
+                "solvent2",
+                "reagent1",
+                "reagent2",
+                "scores",
+            ]
         ]
-        one_df['scores'] = scores
-        one_df['rxn_smiles'] = [input_rxn_smiles[idx]
-                                ] + [''] * (len(conditions) - 1)
-        one_df['top-k'] = [f'top-{x+1}' for x in range(len(conditions)) ]
-        one_df = one_df[[
-            'rxn_smiles', 'top-k', 'catalyst1', 'solvent1', 'solvent2', 'reagent1',
-            'reagent2', 'scores'
-        ]]
         if pred_temperatures:
-            one_df['temperatures'] = [pred_temperatures[idx]
-                                      ] + [''] * (len(conditions) - 1)
-            one_df = one_df[[
-                'rxn_smiles', 'top-k', 'catalyst1', 'solvent1', 'solvent2', 'reagent1',
-                'reagent2', 'temperatures', 'scores'
-            ]]
+            one_df["temperatures"] = [pred_temperatures[idx]] + [""] * (
+                len(conditions) - 1
+            )
+            one_df = one_df[
+                [
+                    "rxn_smiles",
+                    "top-k",
+                    "catalyst1",
+                    "solvent1",
+                    "solvent2",
+                    "reagent1",
+                    "reagent2",
+                    "temperatures",
+                    "scores",
+                ]
+            ]
         one_df = one_df.round(5)
         output_df = output_df.append(one_df)
         output_results.append(one_df)
@@ -76,84 +98,93 @@ def get_output_results(input_rxn_smiles, pred_conditions, pred_temperatures, out
     else:
         return output_results
 
+
 def load_dataset(dataset_root, database_fname, use_temperature=False):
     csv_fpath = os.path.abspath(os.path.join(dataset_root, database_fname))
-    print('Reading database csv from {}...'.format(csv_fpath))
+    print("Reading database csv from {}...".format(csv_fpath))
     database = pd.read_csv(csv_fpath)
 
     all_idx_mapping_data_fpath = os.path.join(
-        dataset_root, '{}_alldata_idx.pkl'.format(database_fname.split('.')[0]))
-    print('Reading index-condition mapping data from {}'.format(all_idx_mapping_data_fpath))
-    with open(all_idx_mapping_data_fpath, 'rb') as f:
+        dataset_root, "{}_alldata_idx.pkl".format(database_fname.split(".")[0])
+    )
+    print(
+        "Reading index-condition mapping data from {}".format(
+            all_idx_mapping_data_fpath
+        )
+    )
+    with open(all_idx_mapping_data_fpath, "rb") as f:
         all_idx2data, all_data2idx = pickle.load(f)
 
     all_condition_labels_fpath = os.path.join(
-        dataset_root, '{}_condition_labels.pkl'.format(database_fname.split('.')[0]))
+        dataset_root, "{}_condition_labels.pkl".format(database_fname.split(".")[0])
+    )
     if not os.path.exists(all_condition_labels_fpath):
-        condition_cols = ['catalyst1', 'solvent1',
-                          'solvent2', 'reagent1', 'reagent2']
+        condition_cols = ["catalyst1", "solvent1", "solvent2", "reagent1", "reagent2"]
         all_condition_labels = []
         for _, row in tqdm(database[condition_cols].iterrows(), total=len(database)):
-            row.loc[pd.isna(row)] = ''
+            row.loc[pd.isna(row)] = ""
             row = list(row)
-            row = ['[BOS]'] + row + ['[EOS]']
+            row = ["[BOS]"] + row + ["[EOS]"]
             all_condition_labels.append([all_data2idx[x] for x in row])
-        assert(len(database) == len(all_condition_labels))
+        assert len(database) == len(all_condition_labels)
     else:
-        with open(all_condition_labels_fpath, 'rb') as f:
+        with open(all_condition_labels_fpath, "rb") as f:
             all_condition_labels = pickle.load(f)
 
     assert len(database) == len(all_condition_labels)
 
     if use_temperature:
-        print('Collecting tempertures data ...')
+        print("Collecting tempertures data ...")
         all_condition_labels_array = np.array(all_condition_labels)
         all_condition_labels = np.concatenate(
-            [
-                all_condition_labels_array,
-                database['temperature'].values.reshape(-1, 1)
-            ],
-            axis=1).tolist()
-    database['condition_labels'] = all_condition_labels
+            [all_condition_labels_array, database["temperature"].values.reshape(-1, 1)],
+            axis=1,
+        ).tolist()
+    database["condition_labels"] = all_condition_labels
     condition_label_mapping = (all_idx2data, all_data2idx)
     return database, condition_label_mapping
 
-def load_test_dataset(dataset_root, database_fname, condition_label_mapping, use_temperature=False):
+
+def load_test_dataset(
+    dataset_root, database_fname, condition_label_mapping, use_temperature=False
+):
     csv_fpath = os.path.abspath(os.path.join(dataset_root, database_fname))
-    print('Reading test dataset csv from {}...'.format(csv_fpath))
+    print("Reading test dataset csv from {}...".format(csv_fpath))
     database = pd.read_csv(csv_fpath)
 
-
     all_idx2data, all_data2idx = condition_label_mapping
-    condition_cols = ['catalyst1', 'solvent1',
-                        'solvent2', 'reagent1', 'reagent2']
+    condition_cols = ["catalyst1", "solvent1", "solvent2", "reagent1", "reagent2"]
     all_condition_labels = []
     for _, row in tqdm(database[condition_cols].iterrows(), total=len(database)):
-        row.loc[pd.isna(row)] = ''
+        row.loc[pd.isna(row)] = ""
         row = list(row)
-        row = ['[BOS]'] + row + ['[EOS]']
+        row = ["[BOS]"] + row + ["[EOS]"]
         all_condition_labels.append([all_data2idx[x] for x in row])
-    assert(len(database) == len(all_condition_labels))
+    assert len(database) == len(all_condition_labels)
 
     if use_temperature:
-        print('Collecting tempertures data ...')
+        print("Collecting tempertures data ...")
         all_condition_labels_array = np.array(all_condition_labels)
         all_condition_labels = np.concatenate(
-            [
-                all_condition_labels_array,
-                database['temperature'].values.reshape(-1, 1)
-            ],
-            axis=1).tolist()
-    database['condition_labels'] = all_condition_labels
+            [all_condition_labels_array, database["temperature"].values.reshape(-1, 1)],
+            axis=1,
+        ).tolist()
+    database["condition_labels"] = all_condition_labels
     condition_label_mapping = (all_idx2data, all_data2idx)
     return database, condition_label_mapping
+
 
 def inference_load(dataset_root, database_fname, use_temperature):
     csv_fpath = os.path.abspath(os.path.join(dataset_root, database_fname))
     all_idx_mapping_data_fpath = os.path.join(
-        dataset_root, '{}_alldata_idx.pkl'.format(database_fname.split('.')[0]))
-    print('Reading index-condition mapping data from {}'.format(all_idx_mapping_data_fpath))
-    with open(all_idx_mapping_data_fpath, 'rb') as f:
+        dataset_root, "{}_alldata_idx.pkl".format(database_fname.split(".")[0])
+    )
+    print(
+        "Reading index-condition mapping data from {}".format(
+            all_idx_mapping_data_fpath
+        )
+    )
+    with open(all_idx_mapping_data_fpath, "rb") as f:
         all_idx2data, all_data2idx = pickle.load(f)
 
     condition_label_mapping = (all_idx2data, all_data2idx)
@@ -161,10 +192,10 @@ def inference_load(dataset_root, database_fname, use_temperature):
 
 
 def print_args(config_file):
-    print('#'*30)
-    with open(config_file, 'r', encoding='utf-8') as f:
-        print(''.join([x for x in f.readlines()]))
-    print('#'*30)
+    print("#" * 30)
+    with open(config_file, "r", encoding="utf-8") as f:
+        print("".join([x for x in f.readlines()]))
+    print("#" * 30)
     print()
 
 
@@ -172,7 +203,7 @@ def condition_bert_head_view(
     attention=None,
     src_tokens=None,
     tgt_tokens=None,
-    html_action: str = 'view',    # view or return
+    html_action: str = "view",  # view or return
 ):
     attention = [x.unsqueeze(0) for x in attention]
     attn_data = []
@@ -180,14 +211,14 @@ def condition_bert_head_view(
     attention = format_attention(attention, include_layers)
     attn_data.append(
         {
-            'name': None,
-            'attn': attention.tolist(),
-            'left_text': src_tokens,
-            'right_text': tgt_tokens
+            "name": None,
+            "attn": attention.tolist(),
+            "left_text": src_tokens,
+            "right_text": tgt_tokens,
         }
     )
 
-    vis_id = 'bertviz-%s' % (uuid.uuid4().hex)
+    vis_id = "bertviz-%s" % (uuid.uuid4().hex)
     select_html = ""
     vis_html = f"""      
         <div id="{vis_id}" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;">
@@ -199,42 +230,62 @@ def condition_bert_head_view(
         </div>
     """
     params = {
-        'attention': attn_data,
-        'default_filter': "0",
-        'root_div_id': vis_id,
-        'layer': None,
-        'heads': None,
-        'include_layers': include_layers
+        "attention": attn_data,
+        "default_filter": "0",
+        "root_div_id": vis_id,
+        "layer": None,
+        "heads": None,
+        "include_layers": include_layers,
     }
 
     pkg_path = pkg_resources.resource_filename("bertviz", ".")
-    if html_action == 'view':
-        display(HTML(
-            '<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>'))
+    if html_action == "view":
+        display(
+            HTML(
+                '<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>'
+            )
+        )
         display(HTML(vis_html))
-        __location__ = os.path.realpath(
-            os.path.join(os.getcwd(), pkg_path))
-        vis_js = open(os.path.join(__location__, 'head_view.js')
-                      ).read().replace("PYTHON_PARAMS", json.dumps(params))
+        __location__ = os.path.realpath(os.path.join(os.getcwd(), pkg_path))
+        vis_js = (
+            open(os.path.join(__location__, "head_view.js"))
+            .read()
+            .replace("PYTHON_PARAMS", json.dumps(params))
+        )
         display(Javascript(vis_js))
-    elif html_action == 'return':
+    elif html_action == "return":
         html1 = HTML(
-            '<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>')
+            '<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>'
+        )
         html2 = HTML(vis_html)
         __location__ = os.path.dirname(os.path.abspath(__file__))
-        vis_js = open(os.path.join(__location__, 'data', 'bert_condition_data',
-                      'head_view.js')).read().replace("PYTHON_PARAMS", json.dumps(params))
+        vis_js = (
+            open(
+                os.path.join(
+                    __location__, "data", "bert_condition_data", "head_view.js"
+                )
+            )
+            .read()
+            .replace("PYTHON_PARAMS", json.dumps(params))
+        )
         html3 = Javascript(vis_js)
-        script = '\n<script type="text/javascript">\n' + html3.data + '\n</script>\n'
+        script = '\n<script type="text/javascript">\n' + html3.data + "\n</script>\n"
         head_html = HTML(html1.data + html2.data + script)
         return head_html
 
 
-def condition_bert_head_heatmap(attention, src_tokens, tgt_tokens, fig_save_path=None, split_map=True, figsize=(46, 20)):
-    print('src_tokens', src_tokens)
-    print('tgt_tokens', tgt_tokens)
-    sns.set(style='ticks', font_scale=1.5)
-    
+def condition_bert_head_heatmap(
+    attention,
+    src_tokens,
+    tgt_tokens,
+    fig_save_path=None,
+    split_map=True,
+    figsize=(46, 20),
+):
+    print("src_tokens", src_tokens)
+    print("tgt_tokens", tgt_tokens)
+    sns.set(style="ticks", font_scale=1.5)
+
     attention = [x.unsqueeze(0) for x in attention]
 
     assert isinstance(attention, tuple) or isinstance(attention, list)
@@ -249,13 +300,15 @@ def condition_bert_head_heatmap(attention, src_tokens, tgt_tokens, fig_save_path
             layer_attention = layer_attention.squeeze()
             for head_idx in range(layer_attention.size(0)):
                 slice_attention = layer_attention[head_idx].transpose(0, 1)
-                slice_attention = slice_attention.to(torch.device('cpu'))
-                df = pd.DataFrame(slice_attention.detach().numpy(),
-                                index=tgt_tokens, columns=src_tokens)
+                slice_attention = slice_attention.to(torch.device("cpu"))
+                df = pd.DataFrame(
+                    slice_attention.detach().numpy(),
+                    index=tgt_tokens,
+                    columns=src_tokens,
+                )
                 # data_list.append(df)
                 x_major_locator = MultipleLocator(1)
-                fig, axes = plt.subplots(nrows=1,
-                                ncols=1, figsize=figsize)
+                fig, axes = plt.subplots(nrows=1, ncols=1, figsize=figsize)
                 sns.heatmap(
                     df,
                     # cmap="rainbow",
@@ -264,43 +317,55 @@ def condition_bert_head_heatmap(attention, src_tokens, tgt_tokens, fig_save_path
                     # cbar_ax=None if i else cbar_ax
                 )
                 axes.set_title(
-                    'Layer {}, Head {}'.format(i+1, head_idx+1), fontsize=30)
+                    "Layer {}, Head {}".format(i + 1, head_idx + 1), fontsize=30
+                )
                 axes.xaxis.tick_top()
                 axes.xaxis.set_major_locator(x_major_locator)
-                axes.set_xticklabels([' '] + src_tokens + [' '])
+                axes.set_xticklabels([" "] + src_tokens + [" "])
                 plt.xticks(fontsize=8, rotation=90)
                 plt.yticks(fontsize=8)
                 # display(fig)
                 if fig_save_path:
-                    fig.savefig('{}_layer{}_head{}.svg'.format(fig_save_path.replace('.svg', ''), i+1, head_idx+1), format="svg", bbox_inches="tight")
+                    fig.savefig(
+                        "{}_layer{}_head{}.svg".format(
+                            fig_save_path.replace(".svg", ""), i + 1, head_idx + 1
+                        ),
+                        format="svg",
+                        bbox_inches="tight",
+                    )
 
     else:
-        fig, axes = plt.subplots(nrows=len(attention),
-                                ncols=attention[0].size(1), figsize=figsize)
+        fig, axes = plt.subplots(
+            nrows=len(attention), ncols=attention[0].size(1), figsize=figsize
+        )
         # data_list = []
-        cbar_ax = fig.add_axes([1.02, .3, .03, .4])
+        cbar_ax = fig.add_axes([1.02, 0.3, 0.03, 0.4])
 
         x_major_locator = MultipleLocator(1)
         for i, layer_attention in enumerate(attention):
             layer_attention = layer_attention.squeeze()
             for head_idx in range(layer_attention.size(0)):
                 slice_attention = layer_attention[head_idx].transpose(0, 1)
-                slice_attention = slice_attention.to(torch.device('cpu'))
-                df = pd.DataFrame(slice_attention.detach().numpy(),
-                                index=tgt_tokens, columns=src_tokens)
+                slice_attention = slice_attention.to(torch.device("cpu"))
+                df = pd.DataFrame(
+                    slice_attention.detach().numpy(),
+                    index=tgt_tokens,
+                    columns=src_tokens,
+                )
                 # data_list.append(df)
                 sns.heatmap(
                     df,
                     # cmap="rainbow",
                     ax=axes[i][head_idx],
                     cbar=i == 0,
-                    cbar_ax=None if i else cbar_ax
+                    cbar_ax=None if i else cbar_ax,
                 )
                 axes[i][head_idx].set_title(
-                    'Layer {}, Head {}'.format(i+1, head_idx+1), fontsize=30)
+                    "Layer {}, Head {}".format(i + 1, head_idx + 1), fontsize=30
+                )
                 axes[i][head_idx].xaxis.tick_top()
                 axes[i][head_idx].xaxis.set_major_locator(x_major_locator)
-                axes[i][head_idx].set_xticklabels([' '] + src_tokens + [' '])
+                axes[i][head_idx].set_xticklabels([" "] + src_tokens + [" "])
         # plt.tight_layout(pad=0.4, w_pad=0.5, h_pad=1.0)
 
         # plt.show()
@@ -343,8 +408,7 @@ def build_classification_dataset(
         # If labels_map is defined, then labels need to be replaced with ints
         if args.labels_map and not args.regression:
             if multi_label:
-                labels = [[args.labels_map[l] for l in label]
-                          for label in labels]
+                labels = [[args.labels_map[l] for l in label] for label in labels]
             else:
                 labels = [args.labels_map[label] for label in labels]
 
@@ -359,8 +423,8 @@ def build_classification_dataset(
             if text_b is not None:
                 data = [
                     (
-                        text_a[i: i + chunksize],
-                        text_b[i: i + chunksize],
+                        text_a[i : i + chunksize],
+                        text_b[i : i + chunksize],
                         tokenizer,
                         args.max_seq_length,
                     )
@@ -368,8 +432,7 @@ def build_classification_dataset(
                 ]
             else:
                 data = [
-                    (text_a[i: i + chunksize], None,
-                     tokenizer, args.max_seq_length)
+                    (text_a[i : i + chunksize], None, tokenizer, args.max_seq_length)
                     for i in range(0, len(text_a), chunksize)
                 ]
 
@@ -404,8 +467,7 @@ def build_classification_dataset(
             data = (examples, (condition_labels, temperature))
 
         if not args.no_cache and not no_cache:
-            logger.info(" Saving features into cached file %s",
-                        cached_features_file)
+            logger.info(" Saving features into cached file %s", cached_features_file)
             torch.save(data, cached_features_file)
 
     return data
@@ -430,7 +492,7 @@ class ConditionWithTempDataset(Dataset):
 def encode(data):
     tokenizer, line, max_seq_length = data
     encode_results = tokenizer(line, padding="max_length", max_length=max_seq_length)
-    encode_results = {k:v[:max_seq_length] for k,v in encode_results.items()}
+    encode_results = {k: v[:max_seq_length] for k, v in encode_results.items()}
     return encode_results
 
 
@@ -442,7 +504,7 @@ def encode_sliding_window(data):
     token_sets = []
     if len(tokens) > max_seq_length - special_tokens_count:
         token_sets = [
-            tokens[i: i + max_seq_length - special_tokens_count]
+            tokens[i : i + max_seq_length - special_tokens_count]
             for i in range(0, len(tokens), stride)
         ]
     else:
@@ -485,9 +547,11 @@ def load_hf_dataset(data, tokenizer, args):
     dataset = load_dataset(
         "text",
         data_files=data,
-        download_mode="force_redownload"
-        if args.reprocess_input_data
-        else "reuse_dataset_if_exists",
+        download_mode=(
+            "force_redownload"
+            if args.reprocess_input_data
+            else "reuse_dataset_if_exists"
+        ),
     )
 
     dataset = dataset.map(
@@ -520,7 +584,7 @@ class SimpleCenterDataset(Dataset):
         assert os.path.isfile(file_path)
         block_size = block_size - special_tokens_count
         directory, filename = os.path.split(file_path)
-        rxn_center_file_path = file_path.replace('rxn', 'rxn_center')
+        rxn_center_file_path = file_path.replace("rxn", "rxn_center")
         cached_features_file = os.path.join(
             args.cache_dir,
             args.model_type + "_cached_lm_" + str(block_size) + "_" + filename,
@@ -530,18 +594,15 @@ class SimpleCenterDataset(Dataset):
             (not args.reprocess_input_data and not args.no_cache)
             or (mode == "dev" and args.use_cached_eval_features and not args.no_cache)
         ):
-            logger.info(" Loading features from cached file %s",
-                        cached_features_file)
+            logger.info(" Loading features from cached file %s", cached_features_file)
             with open(cached_features_file, "rb") as handle:
                 self.examples = pickle.load(handle)
         else:
-            logger.info(
-                " Creating features from dataset file at %s", args.cache_dir)
+            logger.info(" Creating features from dataset file at %s", args.cache_dir)
 
             if sliding_window:
                 no_padding = (
-                    True if args.model_type in [
-                        "gpt2", "openai-gpt"] else False
+                    True if args.model_type in ["gpt2", "openai-gpt"] else False
                 )
                 with open(file_path, encoding="utf-8") as f:
                     lines = [
@@ -561,8 +622,7 @@ class SimpleCenterDataset(Dataset):
                     mode == "dev" and args.use_multiprocessing_for_evaluation
                 ):
                     if args.multiprocessing_chunksize == -1:
-                        chunksize = max(
-                            len(lines) // (args.process_count * 2), 500)
+                        chunksize = max(len(lines) // (args.process_count * 2), 500)
                     else:
                         chunksize = args.multiprocessing_chunksize
 
@@ -577,8 +637,7 @@ class SimpleCenterDataset(Dataset):
                             )
                         )
                 else:
-                    self.examples = [encode_sliding_window(
-                        line) for line in lines]
+                    self.examples = [encode_sliding_window(line) for line in lines]
 
                 self.examples = [
                     example for example_set in self.examples for example in example_set
@@ -615,8 +674,7 @@ class SimpleCenterDataset(Dataset):
 
                 if args.use_multiprocessing:
                     if args.multiprocessing_chunksize == -1:
-                        chunksize = max(
-                            len(lines) // (args.process_count * 2), 500)
+                        chunksize = max(len(lines) // (args.process_count * 2), 500)
                     else:
                         chunksize = args.multiprocessing_chunksize
 
@@ -631,62 +689,65 @@ class SimpleCenterDataset(Dataset):
                     with Pool(args.process_count) as p:
                         self.examples_with_center = list(
                             tqdm(
-                                p.imap(encode, center_lines,
-                                       chunksize=chunksize),
+                                p.imap(encode, center_lines, chunksize=chunksize),
                                 total=len(center_lines),
                                 # disable=silent,
                             )
                         )
                 else:
                     self.examples = [encode(line) for line in lines]
-                    self.examples_with_center = [
-                        encode(line) for line in center_lines]
+                    self.examples_with_center = [encode(line) for line in center_lines]
 
-                self.examples = [
-                    token for tokens in self.examples for token in tokens]
+                self.examples = [token for tokens in self.examples for token in tokens]
                 self.examples_with_center = [
-                    token for tokens in self.examples_with_center for token in tokens]
+                    token for tokens in self.examples_with_center for token in tokens
+                ]
                 if len(self.examples) > block_size:
                     self.examples = [
                         tokenizer.build_inputs_with_special_tokens(
-                            self.examples[i: i + block_size]
+                            self.examples[i : i + block_size]
                         )
                         for i in tqdm(
-                            range(0, len(self.examples) -
-                                  block_size + 1, block_size)
+                            range(0, len(self.examples) - block_size + 1, block_size)
                         )
                     ]
                     self.examples_with_center = [
                         tokenizer.build_inputs_with_special_tokens(
-                            self.examples_with_center[i: i + block_size]
+                            self.examples_with_center[i : i + block_size]
                         )
                         for i in tqdm(
-                            range(0, len(self.examples_with_center) -
-                                  block_size + 1, block_size)
+                            range(
+                                0,
+                                len(self.examples_with_center) - block_size + 1,
+                                block_size,
+                            )
                         )
                     ]
                 else:
                     self.examples = [
-                        tokenizer.build_inputs_with_special_tokens(
-                            self.examples)
+                        tokenizer.build_inputs_with_special_tokens(self.examples)
                     ]
                     self.examples_with_center = [
                         tokenizer.build_inputs_with_special_tokens(
-                            self.examples_with_center)
+                            self.examples_with_center
+                        )
                     ]
-            self.is_rxn_center_tokens = (torch.tensor(
-                self.examples) != torch.tensor(self.examples_with_center)).long()
-            logger.info(" Saving features into cached file %s",
-                        cached_features_file)
+            self.is_rxn_center_tokens = (
+                torch.tensor(self.examples) != torch.tensor(self.examples_with_center)
+            ).long()
+            logger.info(" Saving features into cached file %s", cached_features_file)
             with open(cached_features_file, "wb") as handle:
-                pickle.dump(self.examples, handle,
-                            protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, item):
-        return torch.tensor(self.examples[item], dtype=torch.long), self.is_rxn_center_tokens[item]
+        return (
+            torch.tensor(self.examples[item], dtype=torch.long),
+            self.is_rxn_center_tokens[item],
+        )
+
 
 class SimpleCenterIdxDataset(Dataset):
     def __init__(
@@ -701,12 +762,9 @@ class SimpleCenterIdxDataset(Dataset):
     ):
 
         block_size = block_size - special_tokens_count
-      
+
         if sliding_window:
-            no_padding = (
-                True if args.model_type in [
-                    "gpt2", "openai-gpt"] else False
-            )
+            no_padding = True if args.model_type in ["gpt2", "openai-gpt"] else False
             with open(dataset_df, encoding="utf-8") as f:
                 lines = [
                     (
@@ -725,24 +783,20 @@ class SimpleCenterIdxDataset(Dataset):
                 mode == "dev" and args.use_multiprocessing_for_evaluation
             ):
                 if args.multiprocessing_chunksize == -1:
-                    chunksize = max(
-                        len(lines) // (args.process_count * 2), 500)
+                    chunksize = max(len(lines) // (args.process_count * 2), 500)
                 else:
                     chunksize = args.multiprocessing_chunksize
 
                 with Pool(args.process_count) as p:
                     self.examples = list(
                         tqdm(
-                            p.imap(
-                                encode_sliding_window, lines, chunksize=chunksize
-                            ),
+                            p.imap(encode_sliding_window, lines, chunksize=chunksize),
                             total=len(lines),
                             # disable=silent,
                         )
                     )
             else:
-                self.examples = [encode_sliding_window(
-                    line) for line in lines]
+                self.examples = [encode_sliding_window(line) for line in lines]
 
             self.examples = [
                 example for example_set in self.examples for example in example_set
@@ -754,30 +808,38 @@ class SimpleCenterIdxDataset(Dataset):
             #         for line in f.read().splitlines()
             #         if (len(line) > 0 and not line.isspace())
             #     ]
-            text_lines = dataset_df['text'].tolist()
+            text_lines = dataset_df["text"].tolist()
             lines = [
                 (tokenizer, line, args.max_seq_length)
                 for line in text_lines
                 if (len(line) > 0 and not line.isspace())
             ]
-            
+
             def pad_masks(mask_label, max_seq_length):
                 assert isinstance(mask_label, torch.Tensor)
                 pad_tensor = torch.zeros(1).bool()
-                mask_label_same_with_example = torch.cat([pad_tensor, mask_label, pad_tensor], dim=-1)
+                mask_label_same_with_example = torch.cat(
+                    [pad_tensor, mask_label, pad_tensor], dim=-1
+                )
                 pad_length = max_seq_length - mask_label_same_with_example.shape[0]
-                return torch.cat([mask_label_same_with_example]+ [pad_tensor]*pad_length, dim=-1)[:max_seq_length]
-            
-            center_masks_labels, template_labels = map(list, zip(*dataset_df['labels'].tolist()))
+                return torch.cat(
+                    [mask_label_same_with_example] + [pad_tensor] * pad_length, dim=-1
+                )[:max_seq_length]
 
-            mask_labels = [torch.from_numpy(np.array(x)) for x in tqdm(center_masks_labels)]
-            mask_labels_pad = [pad_masks(x, args.max_seq_length) for x in tqdm(mask_labels)]
+            center_masks_labels, template_labels = map(
+                list, zip(*dataset_df["labels"].tolist())
+            )
 
+            mask_labels = [
+                torch.from_numpy(np.array(x)) for x in tqdm(center_masks_labels)
+            ]
+            mask_labels_pad = [
+                pad_masks(x, args.max_seq_length) for x in tqdm(mask_labels)
+            ]
 
             if args.use_multiprocessing:
                 if args.multiprocessing_chunksize == -1:
-                    chunksize = max(
-                        len(lines) // (args.process_count * 2), 500)
+                    chunksize = max(len(lines) // (args.process_count * 2), 500)
                 else:
                     chunksize = args.multiprocessing_chunksize
 
@@ -797,21 +859,18 @@ class SimpleCenterIdxDataset(Dataset):
             # self.examples = [
             #     token for tokens in self.examples for token in tokens]
 
-
-
-
             def check_data(tokens_ids, mask_labels):
                 flag = True
                 for tokens, mask_label in tqdm(zip(tokens_ids, mask_labels)):
-                    if len(tokens['input_ids']) != len(mask_label.tolist()):
-                        print(tokens['input_ids'])
+                    if len(tokens["input_ids"]) != len(mask_label.tolist()):
+                        print(tokens["input_ids"])
                         print(mask_label.tolist())
-                        print(len(tokens['input_ids']))
+                        print(len(tokens["input_ids"]))
                         print(len(mask_label.tolist()))
                         flag = False
                         return flag
                 return flag
-            
+
             # if len(self.examples) > block_size:
             #     self.examples = [
             #         tokenizer.build_inputs_with_special_tokens(
@@ -834,29 +893,27 @@ class SimpleCenterIdxDataset(Dataset):
             #         tokenizer.build_inputs_with_special_tokens(
             #             self.examples)
             #     ]
-                
+
             #     mask_labels_pad = [
             #         pad_masks(mask_labels_pad)
             #     ]
-            
+
             assert check_data(self.examples, mask_labels_pad)
-            
+
             self.is_rxn_center_tokens = mask_labels_pad
             self.template_labels = template_labels
 
-            
-
         # self.is_rxn_center_tokens = (torch.tensor(
         #     self.examples) != torch.tensor(self.examples_with_center)).long()
-
-
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, item):
 
-        data = {k:torch.tensor(v, dtype=torch.long) for k,v in self.examples[item].items()}
+        data = {
+            k: torch.tensor(v, dtype=torch.long) for k, v in self.examples[item].items()
+        }
 
         return data, self.is_rxn_center_tokens[item], self.template_labels[item]
 
@@ -874,7 +931,7 @@ def mask_tokens_with_rxn(
             "This tokenizer does not have a mask token which is necessary for masked language modeling."
             "Set 'mlm' to False in args if you want to use this tokenizer."
         )
-    inputs = inputs_dict['input_ids']
+    inputs = inputs_dict["input_ids"]
     labels = inputs.clone()
     # We sample a few tokens in each sequence for masked-LM training
     # (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
@@ -888,9 +945,7 @@ def mask_tokens_with_rxn(
     )
     # We sample a few tokens in each sequence for masked reaction center modeling training
     # (with probability args.mrc_probability defaults to 0.5)
-    probability_matrix.masked_fill_(
-        is_center_marks.bool(), value=args.mrc_probability
-    )
+    probability_matrix.masked_fill_(is_center_marks.bool(), value=args.mrc_probability)
     if tokenizer._pad_token is not None:
         padding_mask = labels.eq(tokenizer.pad_token_id)
         probability_matrix.masked_fill_(padding_mask, value=0.0)
@@ -899,16 +954,13 @@ def mask_tokens_with_rxn(
 
     if args.model_type == "electra":
         # For ELECTRA, we replace all masked input tokens with tokenizer.mask_token
-        inputs[masked_indices] = tokenizer.convert_tokens_to_ids(
-            tokenizer.mask_token)
+        inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
     else:
         # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
         indices_replaced = (
-            torch.bernoulli(torch.full(labels.shape, 0.8)
-                            ).bool() & masked_indices
+            torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
         )
-        inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(
-            tokenizer.mask_token)
+        inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
         # 10% of the time, we replace masked input tokens with random word
         indices_random = (
@@ -916,19 +968,19 @@ def mask_tokens_with_rxn(
             & masked_indices
             & ~indices_replaced
         )
-        random_words = torch.randint(
-            len(tokenizer), labels.shape, dtype=torch.long)
+        random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
         inputs[indices_random] = random_words[indices_random]
 
         # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-    inputs_dict['input_ids'] = inputs
+    inputs_dict["input_ids"] = inputs
     return inputs_dict, labels, template_label
+
 
 #  Adapted from  https://github.com/rxn4chemistry/rxnmapper/blob/master/rxnmapper/smiles_utils.py
 def is_atom(token: str, special_tokens: List[str] = BAD_TOKS) -> bool:
     """
 
-    
+
     Determine whether a token is an atom.
 
     Args:
@@ -944,8 +996,7 @@ def is_atom(token: str, special_tokens: List[str] = BAD_TOKS) -> bool:
     return (not is_bad) and normal_atom
 
 
-def get_mask_for_tokens(tokens: List[str],
-                        special_tokens: List[str] = []) -> List[int]:
+def get_mask_for_tokens(tokens: List[str], special_tokens: List[str] = []) -> List[int]:
     """Return a mask for a tokenized smiles, where atom tokens
     are converted to 1 and other tokens to 0.
 
@@ -964,8 +1015,7 @@ def get_mask_for_tokens(tokens: List[str],
     return atom_token_mask
 
 
-def number_tokens(tokens: List[str],
-                  special_tokens: List[str] = BAD_TOKS) -> List[int]:
+def number_tokens(tokens: List[str], special_tokens: List[str] = BAD_TOKS) -> List[int]:
     """Map list of tokens to a list of numbered atoms
 
     Args:
@@ -991,21 +1041,31 @@ def number_tokens(tokens: List[str],
 
     return out
 
-def visualize_atom_attention(smiles, weights, cmap='RdBu', scale=-1, alpha=0, size=(150, 150), add_dummy_atom=False):
-    
-    if smiles != '':
+
+def visualize_atom_attention(
+    smiles,
+    weights,
+    cmap="RdBu",
+    scale=-1,
+    alpha=0,
+    size=(150, 150),
+    add_dummy_atom=False,
+):
+
+    if smiles != "":
         mol = Chem.MolFromSmiles(smiles)
         if add_dummy_atom and (mol.GetNumAtoms() == 1):
             mol = Chem.RWMol(mol)
-            mol.AddAtom(Chem.Atom('*'))
+            mol.AddAtom(Chem.Atom("*"))
             weights.append(0)
     else:
-        mol = Chem.MolFromSmiles('*-*')
+        mol = Chem.MolFromSmiles("*-*")
         weights.append(0)
         weights.append(0)
 
-        
-    fig = SimilarityMaps.GetSimilarityMapFromWeights(mol, weights, colorMap=plt.get_cmap(cmap), scale=scale, alpha=alpha, size=size)
+    fig = SimilarityMaps.GetSimilarityMapFromWeights(
+        mol, weights, colorMap=plt.get_cmap(cmap), scale=scale, alpha=alpha, size=size
+    )
     return fig
 
 
@@ -1022,32 +1082,44 @@ def identify_attention_token_idx_for_rxn_component(src_tokens):
             "rxn smiles is not a complete reaction. Can't find the '>>' to separate the products"
         )
     atom_token_mask = torch.tensor(
-            get_mask_for_tokens(src_tokens, ["[CLS]", "[SEP]"])
-        ).bool()
+        get_mask_for_tokens(src_tokens, ["[CLS]", "[SEP]"])
+    ).bool()
     token2atom = torch.tensor(number_tokens(src_tokens))
-    atom2token = {
-            k: v for k, v in zip(token2atom.tolist(), range(len(token2atom)))
-        }
+    atom2token = {k: v for k, v in zip(token2atom.tolist(), range(len(token2atom)))}
 
+    _reactants_token_idx = torch.tensor(
+        [
+            atom2token[x.item()]
+            for x in token2atom[_reactant_inds][atom_token_mask[_reactant_inds]]
+        ]
+    )  # atom idx 顺序
+    _product_token_idx = torch.tensor(
+        [
+            atom2token[x.item()]
+            for x in token2atom[_product_inds][atom_token_mask[_product_inds]]
+        ]
+    )  # atom idx + reactants atom number
 
-    _reactants_token_idx = torch.tensor([atom2token[x.item()] for x in token2atom[_reactant_inds][atom_token_mask[_reactant_inds]]])   # atom idx 顺序
-    _product_token_idx = torch.tensor([atom2token[x.item()] for x in token2atom[_product_inds][atom_token_mask[_product_inds]]]) # atom idx + reactants atom number
-    
     return _reactants_token_idx, _product_token_idx, atom_token_mask
 
-def viz_attention_reaction(attention_weights, src_tokens, tgt_tokens, rxn_smiles, mean_attn=False):
-    
-    _reactants_token_idx, _product_token_idx, atom_token_mask = identify_attention_token_idx_for_rxn_component(src_tokens=src_tokens)
-    
+
+def viz_attention_reaction(
+    attention_weights, src_tokens, tgt_tokens, rxn_smiles, mean_attn=False
+):
+
+    _reactants_token_idx, _product_token_idx, atom_token_mask = (
+        identify_attention_token_idx_for_rxn_component(src_tokens=src_tokens)
+    )
+
     if mean_attn:
         attention_weights = attention_weights.mean(1).unsqueeze(1).mean(0).unsqueeze(0)
-    
+
     for layer_idx, layer_attentions in enumerate(attention_weights):
         for head_idx, head_attentions in enumerate(layer_attentions):
             if not mean_attn:
-                print('Layer index: {}, Head index: {}'.format(layer_idx, head_idx))
+                print("Layer index: {}, Head index: {}".format(layer_idx, head_idx))
             else:
-                print('Average weight:')
+                print("Average weight:")
             selected_attentions = torch.zeros_like(head_attentions)
             # softmax_attentions[atom_token_mask] = torch.softmax(head_attentions[atom_token_mask], dim=0)
             selected_attentions[atom_token_mask] = head_attentions[atom_token_mask]
@@ -1056,106 +1128,173 @@ def viz_attention_reaction(attention_weights, src_tokens, tgt_tokens, rxn_smiles
             for tgt_token_idx in range(selected_attentions.size(1)):
                 reactants_att = reactants_attentions[tgt_token_idx, :].tolist()
                 products_att = products_attentions[tgt_token_idx, :].tolist()
-                if tgt_tokens[tgt_token_idx]=='': continue
-                print('Predicted Condition: {}'.format(tgt_tokens[tgt_token_idx]))
-                react_fig = visualize_atom_attention(rxn_smiles.split('>>')[0], weights=reactants_att)
-                print('Reactants:')
+                if tgt_tokens[tgt_token_idx] == "":
+                    continue
+                print("Predicted Condition: {}".format(tgt_tokens[tgt_token_idx]))
+                react_fig = visualize_atom_attention(
+                    rxn_smiles.split(">>")[0], weights=reactants_att
+                )
+                print("Reactants:")
                 display(react_fig)
-                print('Products:')
-                prod_fig = visualize_atom_attention(rxn_smiles.split('>>')[1], weights=products_att)
+                print("Products:")
+                prod_fig = visualize_atom_attention(
+                    rxn_smiles.split(">>")[1], weights=products_att
+                )
                 display(prod_fig)
-                print('####################################################################')
+                print(
+                    "####################################################################"
+                )
+
 
 def get_dummy_atom_masks(mol):
     # mol from smarts
     # 获取原子的mask，* --> False, 其余为True
     masks = []
     for atom in mol.GetAtoms():
-        if atom.GetSmarts() == '*':
+        if atom.GetSmarts() == "*":
             masks.append(False)
         else:
             masks.append(True)
     return torch.tensor(masks).bool()
 
 
-def get_subgraph_condtion_attention_score(mol, mol_attentions, subgraph_smiles, subgraph_mols, subgraph_dummy_atom_masks, conditions, condition_masks):
-    
-    
-    
+def get_subgraph_condtion_attention_score(
+    mol,
+    mol_attentions,
+    subgraph_smiles,
+    subgraph_mols,
+    subgraph_dummy_atom_masks,
+    conditions,
+    condition_masks,
+):
+
     one_subgraph_condition_pair_score = defaultdict(list)
     conditions_rm_empty = np.asanyarray(conditions)[condition_masks.numpy()].tolist()
-    condition_type_rm_empty = np.asanyarray(CONDITION_TYPE)[condition_masks.numpy()].tolist()
-    for subgraph_smi, subgraph_mol, dummy_atom_masks, in zip(subgraph_smiles, subgraph_mols, subgraph_dummy_atom_masks):
+    condition_type_rm_empty = np.asanyarray(CONDITION_TYPE)[
+        condition_masks.numpy()
+    ].tolist()
+    for (
+        subgraph_smi,
+        subgraph_mol,
+        dummy_atom_masks,
+    ) in zip(subgraph_smiles, subgraph_mols, subgraph_dummy_atom_masks):
         matches = mol.GetSubstructMatches(subgraph_mol)
         if matches:
             matches_indices = torch.tensor(matches)[:, dummy_atom_masks]
             for matches_idx in matches_indices:
-                pair_scores = mol_attentions[condition_masks, :][:, matches_idx].mean(1).tolist()
-                assert len(conditions_rm_empty) == len(pair_scores) == len(condition_type_rm_empty)
-                for condition, condition_type, score in zip(conditions_rm_empty, condition_type_rm_empty, pair_scores):
-                    one_subgraph_condition_pair_score['{}[PAIR]{}[TYPE]{}'.format(subgraph_smi, condition, condition_type)].append(score)
-        
+                pair_scores = (
+                    mol_attentions[condition_masks, :][:, matches_idx].mean(1).tolist()
+                )
+                assert (
+                    len(conditions_rm_empty)
+                    == len(pair_scores)
+                    == len(condition_type_rm_empty)
+                )
+                for condition, condition_type, score in zip(
+                    conditions_rm_empty, condition_type_rm_empty, pair_scores
+                ):
+                    one_subgraph_condition_pair_score[
+                        "{}[PAIR]{}[TYPE]{}".format(
+                            subgraph_smi, condition, condition_type
+                        )
+                    ].append(score)
+
     return one_subgraph_condition_pair_score
+
 
 def merge_score_dict(overall_score_dict, one_score_dict):
     for key in one_score_dict:
         overall_score_dict[key] += one_score_dict[key]
     return overall_score_dict
 
-def analyze_subgraph_attention_with_condition(input_tokens_list, rxn_smiles, predicted_conditions, attention_weights, subgraph_smiles):
 
-    # 分析时忽略空的Condition-->'' 以及不考虑匹配中假原子'*'的attention 
-    assert len(input_tokens_list) == len(rxn_smiles) == len(predicted_conditions) == len(attention_weights)
-    
+def analyze_subgraph_attention_with_condition(
+    input_tokens_list,
+    rxn_smiles,
+    predicted_conditions,
+    attention_weights,
+    subgraph_smiles,
+):
+
+    # 分析时忽略空的Condition-->'' 以及不考虑匹配中假原子'*'的attention
+    assert (
+        len(input_tokens_list)
+        == len(rxn_smiles)
+        == len(predicted_conditions)
+        == len(attention_weights)
+    )
+
     subgraph_mols = [Chem.MolFromSmarts(x) for x in subgraph_smiles]
     subgraph_dummy_atom_masks = [get_dummy_atom_masks(mol) for mol in subgraph_mols]
     subgraph_condition_pair_score = defaultdict(list)
     for src_tokens, rxn, one_conditions, one_attentions in tqdm(
-        zip(
-        input_tokens_list,
-        rxn_smiles,
-        predicted_conditions,
-        attention_weights
-    ),
-        desc='Analysing Function Group-Conditions Attentions',
-        total=len(input_tokens_list)):
-        
-        condition_masks = torch.from_numpy(np.asanyarray(one_conditions) != '')
-        
-        _reactants_token_idx, _product_token_idx, atom_token_mask = identify_attention_token_idx_for_rxn_component(src_tokens=src_tokens)
+        zip(input_tokens_list, rxn_smiles, predicted_conditions, attention_weights),
+        desc="Analysing Function Group-Conditions Attentions",
+        total=len(input_tokens_list),
+    ):
+
+        condition_masks = torch.from_numpy(np.asanyarray(one_conditions) != "")
+
+        _reactants_token_idx, _product_token_idx, atom_token_mask = (
+            identify_attention_token_idx_for_rxn_component(src_tokens=src_tokens)
+        )
         reduced_one_attentions = one_attentions.mean(1).mean(0)
         selected_attentions = torch.zeros_like(reduced_one_attentions)
         selected_attentions[atom_token_mask] = reduced_one_attentions[atom_token_mask]
         reactants_attentions = selected_attentions[_reactants_token_idx].T
         products_attentions = selected_attentions[_product_token_idx].T
-        
-        react, prod = rxn.split('>>')
-        
+
+        react, prod = rxn.split(">>")
+
         react_mol = Chem.MolFromSmiles(react)
         prod_mol = Chem.MolFromSmiles(prod)
-        
-        react_one_subgraph_condition_pair_score = get_subgraph_condtion_attention_score(react_mol, reactants_attentions, subgraph_smiles, subgraph_mols, subgraph_dummy_atom_masks, one_conditions, condition_masks)
-        subgraph_condition_pair_score = merge_score_dict(subgraph_condition_pair_score, react_one_subgraph_condition_pair_score)
-        
-        prod_one_subgraph_condition_pair_score = get_subgraph_condtion_attention_score(prod_mol, products_attentions, subgraph_smiles, subgraph_mols, subgraph_dummy_atom_masks, one_conditions, condition_masks)
-        subgraph_condition_pair_score = merge_score_dict(subgraph_condition_pair_score, prod_one_subgraph_condition_pair_score)
-    
-    
-    
-    pairs = [x.split('[PAIR]') for x in list(subgraph_condition_pair_score.keys())]
+
+        react_one_subgraph_condition_pair_score = get_subgraph_condtion_attention_score(
+            react_mol,
+            reactants_attentions,
+            subgraph_smiles,
+            subgraph_mols,
+            subgraph_dummy_atom_masks,
+            one_conditions,
+            condition_masks,
+        )
+        subgraph_condition_pair_score = merge_score_dict(
+            subgraph_condition_pair_score, react_one_subgraph_condition_pair_score
+        )
+
+        prod_one_subgraph_condition_pair_score = get_subgraph_condtion_attention_score(
+            prod_mol,
+            products_attentions,
+            subgraph_smiles,
+            subgraph_mols,
+            subgraph_dummy_atom_masks,
+            one_conditions,
+            condition_masks,
+        )
+        subgraph_condition_pair_score = merge_score_dict(
+            subgraph_condition_pair_score, prod_one_subgraph_condition_pair_score
+        )
+
+    pairs = [x.split("[PAIR]") for x in list(subgraph_condition_pair_score.keys())]
     subgraph_list = list(set([x[0] for x in pairs]))
     subgraph_list.sort()
     condition_with_type_list = list(set([x[1] for x in pairs]))
     condition_with_type_list.sort()
-    score_map = pd.DataFrame(np.zeros((len(subgraph_list), len(condition_with_type_list))))
+    score_map = pd.DataFrame(
+        np.zeros((len(subgraph_list), len(condition_with_type_list)))
+    )
     score_map.index = subgraph_list
     score_map.columns = condition_with_type_list
-    conditions_list, conditions_types = zip(*[x.split('[TYPE]') for x in condition_with_type_list])
-    # condition   
-    for pair in  subgraph_condition_pair_score:
-        subgraph_smi, condition_with_type = pair.split('[PAIR]')
-        score_map.loc[subgraph_smi, condition_with_type] = np.array(subgraph_condition_pair_score[pair]).mean()
-    
+    conditions_list, conditions_types = zip(
+        *[x.split("[TYPE]") for x in condition_with_type_list]
+    )
+    # condition
+    for pair in subgraph_condition_pair_score:
+        subgraph_smi, condition_with_type = pair.split("[PAIR]")
+        score_map.loc[subgraph_smi, condition_with_type] = np.array(
+            subgraph_condition_pair_score[pair]
+        ).mean()
+
     score_map_condition_type_dict = {}
     for c_type in CONDITION_TYPE:
         type_indices = np.asanyarray(conditions_types) == c_type
@@ -1163,27 +1302,27 @@ def analyze_subgraph_attention_with_condition(input_tokens_list, rxn_smiles, pre
         type_columns = np.asanyarray(conditions_list)[type_indices].tolist()
         type_score_map.columns = type_columns
         score_map_condition_type_dict[c_type] = type_score_map
-    
-    return  score_map_condition_type_dict
+
+    return score_map_condition_type_dict
 
 
 def generate_vocab(rxn_smiles, vocab_path):
     general_vocab = [
-        '[PAD]',
-        '[unused1]',
-        '[unused2]',
-        '[unused3]',
-        '[unused4]',
-        '[unused5]',
-        '[unused6]',
-        '[unused7]',
-        '[unused8]',
-        '[unused9]',
-        '[unused10]',
-        '[UNK]',
-        '[CLS]',
-        '[SEP]',
-        '[MASK]',
+        "[PAD]",
+        "[unused1]",
+        "[unused2]",
+        "[unused3]",
+        "[unused4]",
+        "[unused5]",
+        "[unused6]",
+        "[unused7]",
+        "[unused8]",
+        "[unused9]",
+        "[unused10]",
+        "[UNK]",
+        "[CLS]",
+        "[SEP]",
+        "[MASK]",
     ]
     vocab = set(general_vocab)
     basic_tokenizer = RegexTokenizer()
@@ -1191,8 +1330,8 @@ def generate_vocab(rxn_smiles, vocab_path):
         tokens = basic_tokenizer.tokenize(rxn)
         for token in tokens:
             vocab.add(token)
-    print('A total of {} vacabs were obtained.'.format(len(vocab)))
-    print('Write vocabs to {}'.format(os.path.abspath(vocab_path)))
+    print("A total of {} vacabs were obtained.".format(len(vocab)))
+    print("Write vocabs to {}".format(os.path.abspath(vocab_path)))
 
-    with open(vocab_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(list(vocab)))
+    with open(vocab_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(list(vocab)))
