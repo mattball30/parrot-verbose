@@ -1,10 +1,11 @@
-database_path: '../dataset/source_dataset/USPTO_condition_final'
+mode: 'train'
+database_path: '/data/mball/data/uspto-rcr/'
 database_name: 'USPTO_condition'
-test_database_path: '../dataset/source_dataset/USPTO_condition_final'
+test_database_path: '/data/mball/data/uspto-rcr/'
 test_database_name: 'USPTO_condition_pred_category_testset_catalyst_na'
 using_super_class_to_test: true
-model_path: ./model
-model_name: 'baseline_train_1_USPTO_condition'
+model_path: /data/mball/data/uspto-rcr/
+model_name: 'baseline_train_uspto_condition'
 use_temperature: false
 gpu: 0
 lr: 0.0010
@@ -12,13 +13,16 @@ batch_size: 512
 epochs: 50
 h_dim: 1000
 dropout_rate: 0.5
-top_fname: test_catalyst_na_dataset_uspto_supercls_accuracy.csv
+top_fname: uspto_condition_top_k.csv
 condition_to_calculate:
   - s1
   - r1
+  - c1
+  - s2
+  - r2
 topk_rank_thres:
-  c1: 1
+  c1: 2
   s1: 3
   s2: 1
-  r1: 5
+  r1: 3
   r2: 1

@@ -16,7 +16,13 @@ import wandb
 import yaml
 from torch.utils.data import Dataset, DataLoader
 import json
-from train_baseline_model import ConditionDataset, caculate_accuracy, get_one_hot_input, load_model, load_dataset
+from train_baseline_model import (
+    ConditionDataset,
+    caculate_accuracy,
+    get_one_hot_input,
+    load_model,
+    load_dataset,
+)
 
 # from torch.utils.tensorboard import SummaryWriter
 
@@ -26,76 +32,81 @@ work_space = os.path.dirname(__file__)
 
 
 def load_test_dataset(data_root, database_name, label_dict, use_temperature=False):
-         
     fp_size = 16384
-    print('Loading condition data from {}'.format(data_root))
+    print("Loading condition data from {}".format(data_root))
 
-    print('Loading test database dataframe...')
-    database_df = pd.read_csv(os.path.join(data_root, f'{database_name}.csv'))
-    print('Loaded {} data'.format(len(database_df)))
+    print("Loading test database dataframe...")
+    database_df = pd.read_csv(os.path.join(data_root, f"{database_name}.csv"))
+    print("Loaded {} data".format(len(database_df)))
 
-    print('caculating fps...')
+    print("caculating fps...")
     canonical_rxn = database_df.canonical_rxn.tolist()
     prod_fps = []
     rxn_fps = []
     for rxn in tqdm(canonical_rxn):
-        rsmi, psmi = rxn.split('>>')
+        rsmi, psmi = rxn.split(">>")
         [pfp, rfp] = create_rxn_Morgan2FP_separately(
-            rsmi, psmi, rxnfpsize=fp_size, pfpsize=fp_size, useFeatures=False, calculate_rfp=True, useChirality=True)
+            rsmi,
+            psmi,
+            rxnfpsize=fp_size,
+            pfpsize=fp_size,
+            useFeatures=False,
+            calculate_rfp=True,
+            useChirality=True,
+        )
         rxn_fp = pfp - rfp
         prod_fps.append(pfp)
         rxn_fps.append(rxn_fp)
     prod_fps = np.array(prod_fps)
     rxn_fps = np.array(rxn_fps)
-    print('prod_fps shape:', prod_fps.shape)
-    print('rxn_fps shape:', rxn_fps.shape)
-    print('########################################################')
+    print("prod_fps shape:", prod_fps.shape)
+    print("rxn_fps shape:", rxn_fps.shape)
+    print("########################################################")
     prod_fps_dict = {}
     rxn_fps_dict = {}
     if use_temperature:
         temperature_dict = {}
     # for dataset in list(set(database_df['dataset'].tolist())):
     dataset_prod_fps = prod_fps
-    prod_fps_dict['test'] = dataset_prod_fps
+    prod_fps_dict["test"] = dataset_prod_fps
     dataset_rxn_fps = rxn_fps
-    rxn_fps_dict['test'] = dataset_rxn_fps
-    print('{} prod_fps shape: {}'.format('test', dataset_prod_fps.shape))
-    print('{} rxn_fps shape: {}'.format('test', dataset_rxn_fps.shape))
+    rxn_fps_dict["test"] = dataset_rxn_fps
+    print("{} prod_fps shape: {}".format("test", dataset_prod_fps.shape))
+    print("{} rxn_fps shape: {}".format("test", dataset_rxn_fps.shape))
     if use_temperature:
-        dataset_temperature = database_df['temperature'].values
-        temperature_dict['test'] = dataset_temperature
-        print('{} temperature array shape: {}'.format(
-            'test', dataset_temperature.shape))
+        dataset_temperature = database_df["temperature"].values
+        temperature_dict["test"] = dataset_temperature
+        print(
+            "{} temperature array shape: {}".format("test", dataset_temperature.shape)
+        )
     new_label_dict = OrderedDict()
-    for name in ['catalyst1', 'solvent1', 'solvent2', 'reagent1', 'reagent2']:
+    for name in ["catalyst1", "solvent1", "solvent2", "reagent1", "reagent2"]:
         [_label_dic, name_labels] = label_dict[name]
-        print('Condition name: {}, categories: {}'.format(
-            name, len(_label_dic[0])))
+        print("Condition name: {}, categories: {}".format(name, len(_label_dic[0])))
         name_data = database_df[name]
-        name_data[pd.isna(name_data)] = ''
+        name_data[pd.isna(name_data)] = ""
         name_labels = {}
         # for dataset in list(set(database_df['dataset'].tolist())):
         condition2label = _label_dic[1]
-        name_labels['test'] = [condition2label[x]
-                                for x in name_data.tolist()]
-        name_labels['test'] = np.array(name_labels['test'])
-        print('{}: {}'.format('test', len(name_labels['test'])))
+        name_labels["test"] = [condition2label[x] for x in name_data.tolist()]
+        name_labels["test"] = np.array(name_labels["test"])
+        print("{}: {}".format("test", len(name_labels["test"])))
 
-        print('########################################################')
+        print("########################################################")
         new_label_dict[name] = [_label_dic, name_labels]
     if use_temperature:
-        new_label_dict['temperature'] = temperature_dict
-    fps_dict = {'prod_fps': prod_fps_dict, 'rxn_fps': rxn_fps_dict}
+        new_label_dict["temperature"] = temperature_dict
+    fps_dict = {"prod_fps": prod_fps_dict, "rxn_fps": rxn_fps_dict}
     return fps_dict, new_label_dict
+
 
 work_space = os.path.dirname(__file__)
 
 
 def load_dataset_label(data_root, database_name, use_temperature=False):
-    print('Loading condition data from {}'.format(data_root))
+    print("Loading condition data from {}".format(data_root))
 
-    print('Loading database dataframe...')
-
+    print("Loading database dataframe...")
 
     # print('Loading caculated fps...')
     # prod_fps = np.load(os.path.join(
@@ -108,38 +119,49 @@ def load_dataset_label(data_root, database_name, use_temperature=False):
     if use_temperature:
         temperature_dict = {}
 
-    print('Loading label dict...')
+    print("Loading label dict...")
     label_dict = OrderedDict()
-    for name in ['catalyst1', 'solvent1', 'solvent2', 'reagent1', 'reagent2']:
-        with open(os.path.join(data_root, '{}_{}.pkl'.format(database_name, name)), 'rb') as f:
+    for name in ["catalyst1", "solvent1", "solvent2", "reagent1", "reagent2"]:
+        with open(
+            os.path.join(data_root, "{}_{}.pkl".format(database_name, name)), "rb"
+        ) as f:
             _label_dic = pickle.load(f)
-        print('Condition name: {}, categories: {}'.format(
-            name, len(_label_dic[0])))
+        print("Condition name: {}, categories: {}".format(name, len(_label_dic[0])))
 
         label_dict[name] = [_label_dic, None]
-        print('########################################################')
+        print("########################################################")
 
     fps_dict = None
     return fps_dict, label_dict
 
-def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk_rank_thres=None, save_topk_path=None, use_temperature=False, top_fname=None, super_class_dicts=None):
-    print('Caculating validataion topk accuracy...')
+
+def caculate_accuracy_supercls(
+    model,
+    data_loader,
+    device,
+    condition2label,
+    topk_rank_thres=None,
+    save_topk_path=None,
+    use_temperature=False,
+    top_fname=None,
+    super_class_dicts=None,
+):
+    print("Caculating validataion topk accuracy...")
     if not topk_rank_thres:
         topk_rank_thres = {
-            'c1': 1,
-            's1': 3,
-            's2': 1,
-            'r1': 5,
-            'r2': 1,
+            "c1": 1,
+            "s1": 3,
+            "s2": 1,
+            "r1": 5,
+            "r2": 1,
         }
 
     def get_accuracy_for_one(one_pred, one_ground_truth, topk_get=[1, 3, 5, 10, 15]):
         repeat_number = one_pred.size(0)
         label2condition = {}
         for key in condition2label:
-            label2condition[key] = {v:k for k,v in condition2label[key].items()}
-        hit_mat = one_ground_truth.unsqueeze(
-            0).repeat(repeat_number, 1) == one_pred
+            label2condition[key] = {v: k for k, v in condition2label[key].items()}
+        hit_mat = one_ground_truth.unsqueeze(0).repeat(repeat_number, 1) == one_pred
         overall_hit_mat = hit_mat.sum(1) == hit_mat.size(1)
         topk_hit_df = pd.DataFrame()
         for k in topk_get:
@@ -164,9 +186,7 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
     topk_acc_mat = np.zeros((6, 5))
     closest_erro = 0.0
     for data in tqdm(data_loader):
-
         with torch.no_grad():
-
             data = [x.to(device) for x in data]
             if not use_temperature:
                 pfp, rfp, c1, s1, s2, r1, r2 = data
@@ -174,8 +194,16 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                 pfp, rfp, c1, s1, s2, r1, r2, t = data
 
             fp_emb = model.fp_func(pfp, rfp)
-            one_batch_ground_truth = torch.cat([c1.unsqueeze(1), s1.unsqueeze(1), s2.unsqueeze(
-                1), r1.unsqueeze(1), r2.unsqueeze(1)], dim=-1)
+            one_batch_ground_truth = torch.cat(
+                [
+                    c1.unsqueeze(1),
+                    s1.unsqueeze(1),
+                    s2.unsqueeze(1),
+                    r1.unsqueeze(1),
+                    r2.unsqueeze(1),
+                ],
+                dim=-1,
+            )
             # if device != torch.device('cpu'):
             #     one_batch_ground_truth = torch.cat([c1.unsqueeze(1), s1.unsqueeze(1), s2.unsqueeze(
             #         1), r1.unsqueeze(1), r2.unsqueeze(1)], dim=-1).cpu().numpy()
@@ -226,7 +254,7 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
             one_batch_t_preds = []
 
             c1_preds = model.c1_func(fp_emb)
-            c1_scores, c1_cdts = c1_preds.squeeze().topk(topk_rank_thres['c1'])
+            c1_scores, c1_cdts = c1_preds.squeeze().topk(topk_rank_thres["c1"])
             for c1_top in range(c1_cdts.size(-1)):
                 # if device != torch.device('cpu'):
                 #     pred_list = c1_cdts[:, c1_top].cpu().numpy().tolist()
@@ -239,12 +267,10 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                 c1_pred = c1_cdts[:, c1_top]
                 c1_score = c1_scores[:, c1_top]
 
-                c1_input = get_one_hot_input(
-                    c1_pred, len(condition2label['catalyst1']))
+                c1_input = get_one_hot_input(c1_pred, len(condition2label["catalyst1"]))
 
                 s1_preds = model.s1_func(fp_emb, c1_input)
-                s1_scores, s1_cdts = s1_preds.squeeze().topk(
-                    topk_rank_thres['s1'])
+                s1_scores, s1_cdts = s1_preds.squeeze().topk(topk_rank_thres["s1"])
                 for s1_top in range(s1_cdts.size(-1)):
                     # if device != torch.device('cpu'):
                     #     pred_list = s1_cdts[:, s1_top].cpu().numpy().tolist()
@@ -256,11 +282,11 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                     s1_pred = s1_cdts[:, s1_top]
                     s1_score = s1_scores[:, s1_top]
                     s1_input = get_one_hot_input(
-                        s1_pred, len(condition2label['solvent1']))
+                        s1_pred, len(condition2label["solvent1"])
+                    )
 
                     s2_preds = model.s2_func(fp_emb, c1_input, s1_input)
-                    s2_scores, s2_cdts = s2_preds.squeeze().topk(
-                        topk_rank_thres['s2'])
+                    s2_scores, s2_cdts = s2_preds.squeeze().topk(topk_rank_thres["s2"])
                     for s2_top in range(s2_cdts.size(-1)):
                         # if device != torch.device('cpu'):
                         #     pred_list = s2_cdts[:,
@@ -273,12 +299,13 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                         s2_pred = s2_cdts[:, s2_top]
                         s2_score = s2_scores[:, s2_top]
                         s2_input = get_one_hot_input(
-                            s2_pred, len(condition2label['solvent2']))
+                            s2_pred, len(condition2label["solvent2"])
+                        )
 
-                        r1_preds = model.r1_func(
-                            fp_emb, c1_input, s1_input, s2_input)
+                        r1_preds = model.r1_func(fp_emb, c1_input, s1_input, s2_input)
                         r1_scores, r1_cdts = r1_preds.squeeze().topk(
-                            topk_rank_thres['r1'])
+                            topk_rank_thres["r1"]
+                        )
                         for r1_top in range(r1_cdts.size(-1)):
                             # if device != torch.device('cpu'):
                             #     pred_list = r1_cdts[:, r1_top].cpu(
@@ -291,12 +318,15 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                             r1_pred = r1_cdts[:, r1_top]
                             r1_score = r1_scores[:, r1_top]
                             r1_input = get_one_hot_input(
-                                r1_pred, len(condition2label['reagent1']))
+                                r1_pred, len(condition2label["reagent1"])
+                            )
 
                             r2_preds = model.r2_func(
-                                fp_emb, c1_input, s1_input, s2_input, r1_input)
+                                fp_emb, c1_input, s1_input, s2_input, r1_input
+                            )
                             r2_scores, r2_cdts = r2_preds.squeeze().topk(
-                                topk_rank_thres['r2'])
+                                topk_rank_thres["r2"]
+                            )
                             for r2_top in range(r2_cdts.size(-1)):
                                 # if device != torch.device('cpu'):
                                 #     pred_list = r2_cdts[:, r2_top].cpu(
@@ -310,24 +340,43 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                                 #                         ] = pred_list
                                 # r2_pred_list = pred_list
 
-                                one_pred = torch.cat([c1_pred.unsqueeze(1), s1_pred.unsqueeze(
-                                    1), s2_pred.unsqueeze(1), r1_pred.unsqueeze(1), r2_pred.unsqueeze(1)], dim=-1)
-                                one_score = c1_score * s1_score * s2_score * r1_score * r2_score
+                                one_pred = torch.cat(
+                                    [
+                                        c1_pred.unsqueeze(1),
+                                        s1_pred.unsqueeze(1),
+                                        s2_pred.unsqueeze(1),
+                                        r1_pred.unsqueeze(1),
+                                        r2_pred.unsqueeze(1),
+                                    ],
+                                    dim=-1,
+                                )
+                                one_score = (
+                                    c1_score * s1_score * s2_score * r1_score * r2_score
+                                )
                                 one_batch_preds.append(one_pred)
                                 one_batch_scores.append(one_score)
 
                                 if use_temperature:
                                     r2_input = get_one_hot_input(
-                                        r2_pred, len(condition2label['reagent2']))
+                                        r2_pred, len(condition2label["reagent2"])
+                                    )
                                     t_preds = model.T_func(
-                                        fp_emb, c1_input, s1_input, s2_input, r1_input, r2_input)
+                                        fp_emb,
+                                        c1_input,
+                                        s1_input,
+                                        s2_input,
+                                        r1_input,
+                                        r2_input,
+                                    )
                                     t_preds = t_preds.squeeze()
                                     one_batch_t_preds.append(t_preds)
 
             one_batch_preds = torch.cat(
-                [x.unsqueeze(0) for x in one_batch_preds], dim=0)
+                [x.unsqueeze(0) for x in one_batch_preds], dim=0
+            )
             one_batch_scores = torch.cat(
-                [x.unsqueeze(0) for x in one_batch_scores], dim=0)
+                [x.unsqueeze(0) for x in one_batch_scores], dim=0
+            )
             if use_temperature:
                 one_batch_t_preds = torch.cat(
                     [x.unsqueeze(0) for x in one_batch_t_preds], dim=0
@@ -338,22 +387,25 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
             batch_number = pfp.size(0)
             for n in range(batch_number):
                 sorted_one_batch_preds.append(
-                    one_batch_preds[one_batch_scores[:, n].argsort(
-                        descending=True), n, :]
+                    one_batch_preds[
+                        one_batch_scores[:, n].argsort(descending=True), n, :
+                    ]
                 )
                 if use_temperature:
                     sorted_one_batch_t_preds.append(
-                        one_batch_t_preds[one_batch_scores[:,
-                                                           n].argsort(descending=True), n]
+                        one_batch_t_preds[
+                            one_batch_scores[:, n].argsort(descending=True), n
+                        ]
                     )
             sorted_one_batch_preds = torch.cat(
-                [x.unsqueeze(0) for x in sorted_one_batch_preds], dim=0)
+                [x.unsqueeze(0) for x in sorted_one_batch_preds], dim=0
+            )
             if use_temperature:
                 sorted_one_batch_t_preds = torch.cat(
-                    [x.unsqueeze(0) for x in sorted_one_batch_t_preds], dim=0)
+                    [x.unsqueeze(0) for x in sorted_one_batch_t_preds], dim=0
+                )
                 closest_one_batch_t_preds = sorted_one_batch_t_preds[:, 0]
                 closest_erro += torch.abs(closest_one_batch_t_preds - t).sum()
-
 
             one_batch_topk_acc_mat = np.zeros((6, 5))
             topk_get = [1, 3, 5, 10, 15]
@@ -362,90 +414,116 @@ def caculate_accuracy_supercls(model, data_loader, device, condition2label, topk
                 one_sample_results_supercls = []
                 for pred in one_sample_results.tolist():
                     pred_tokens = [
-                        label2condition['catalyst1'][pred[0]],
-                        label2condition['solvent1'][pred[1]],
-                        label2condition['solvent2'][pred[2]],
-                        label2condition['reagent1'][pred[3]],
-                        label2condition['reagent2'][pred[4]],
-                        ]
+                        label2condition["catalyst1"][pred[0]],
+                        label2condition["solvent1"][pred[1]],
+                        label2condition["solvent2"][pred[2]],
+                        label2condition["reagent1"][pred[3]],
+                        label2condition["reagent2"][pred[4]],
+                    ]
                     pred_supercls = [
-                        condition2label['catalyst1'][pred_tokens[0]],
-                        super_class_dicts['solvent'][pred_tokens[1]] + 500,
-                        super_class_dicts['solvent'][pred_tokens[2]] + 1000,
-                        super_class_dicts['reagent'][pred_tokens[3]] + 1500,
-                        super_class_dicts['reagent'][pred_tokens[4]] + 2000,
-                        
+                        condition2label["catalyst1"][pred_tokens[0]],
+                        super_class_dicts["solvent"][pred_tokens[1]] + 500,
+                        super_class_dicts["solvent"][pred_tokens[2]] + 1000,
+                        super_class_dicts["reagent"][pred_tokens[3]] + 1500,
+                        super_class_dicts["reagent"][pred_tokens[4]] + 2000,
                     ]
                     one_sample_results_supercls.append(pred_supercls)
-                
+
                 one_label = one_batch_ground_truth[idx].tolist()
-                one_tokens = [                        
-                    label2condition['catalyst1'][one_label[0]],
-                    label2condition['solvent1'][one_label[1]],
-                    label2condition['solvent2'][one_label[2]],
-                    label2condition['reagent1'][one_label[3]],
-                    label2condition['reagent2'][one_label[4]],
-                    ]
+                one_tokens = [
+                    label2condition["catalyst1"][one_label[0]],
+                    label2condition["solvent1"][one_label[1]],
+                    label2condition["solvent2"][one_label[2]],
+                    label2condition["reagent1"][one_label[3]],
+                    label2condition["reagent2"][one_label[4]],
+                ]
                 one_label_supercls = [
-                    condition2label['catalyst1'][one_tokens[0]],
-                    super_class_dicts['solvent'][one_tokens[1]] + 500,
-                    super_class_dicts['solvent'][one_tokens[2]] + 1000,
-                    super_class_dicts['reagent'][one_tokens[3]] + 1500,
-                    super_class_dicts['reagent'][one_tokens[4]] + 2000,
+                    condition2label["catalyst1"][one_tokens[0]],
+                    super_class_dicts["solvent"][one_tokens[1]] + 500,
+                    super_class_dicts["solvent"][one_tokens[2]] + 1000,
+                    super_class_dicts["reagent"][one_tokens[3]] + 1500,
+                    super_class_dicts["reagent"][one_tokens[4]] + 2000,
                 ]
                 labels_supercls = one_label_supercls
-                
-                one_sample_results_supercls = torch.tensor(one_sample_results_supercls, device=sorted_one_batch_preds.device)
-                labels_supercls = torch.tensor(labels_supercls, device=sorted_one_batch_preds.device)
+
+                one_sample_results_supercls = torch.tensor(
+                    one_sample_results_supercls, device=sorted_one_batch_preds.device
+                )
+                labels_supercls = torch.tensor(
+                    labels_supercls, device=sorted_one_batch_preds.device
+                )
                 topk_hit_df = get_accuracy_for_one(
-                    one_sample_results_supercls, labels_supercls, topk_get=topk_get)
+                    one_sample_results_supercls, labels_supercls, topk_get=topk_get
+                )
                 one_batch_topk_acc_mat += topk_hit_df.values
             topk_acc_mat += one_batch_topk_acc_mat
     topk_acc_mat /= len(data_loader.dataset)
     topk_acc_df = pd.DataFrame(topk_acc_mat)
 
-    topk_acc_df.columns = [f'top-{k} accuracy' for k in topk_get]
-    topk_acc_df.index = ['c1', 's1', 's2', 'r1', 'r2', 'overall']
+    topk_acc_df.columns = [f"top-{k} accuracy" for k in topk_get]
+    topk_acc_df.index = ["c1", "s1", "s2", "r1", "r2", "overall"]
     if use_temperature:
         closest_temp_mae = (closest_erro / len(data_loader.dataset)).item()
-        topk_acc_df.loc['closest_pred_temp_mae'] = [
-            closest_temp_mae] * len(topk_acc_df.columns)
+        topk_acc_df.loc["closest_pred_temp_mae"] = [closest_temp_mae] * len(
+            topk_acc_df.columns
+        )
     topk_acc_df = topk_acc_df.round(4)
     print(topk_acc_df)
     if top_fname:
-        
         if save_topk_path:
             topk_acc_df.to_csv(os.path.join(save_topk_path, top_fname))
     else:
         if save_topk_path:
-            topk_acc_df.to_csv(os.path.join(save_topk_path, 'test_accuacy.csv'))
+            topk_acc_df.to_csv(os.path.join(save_topk_path, "test_accuacy.csv"))
     return topk_acc_df
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     seed = 123
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    
-    config = yaml.load(open('./beseline_config/baseline_config_reaxys_total_syn_catalyst_na.yaml', "r"),
-                       Loader=yaml.FullLoader)
 
-    device = torch.device('cuda:{}'.format(
-        config['gpu'])) if config['gpu'] >= 0 else torch.device('cpu')
-    time_str = time.strftime('%Y-%m-%d_%Hh-%Mm-%Ss',
-                             time.localtime(time.time()))
+    config = yaml.load(
+        open(
+            "./beseline_config/baseline_config_reaxys_total_syn_catalyst_na.yaml", "r"
+        ),
+        Loader=yaml.FullLoader,
+    )
+
+    device = (
+        torch.device("cuda:{}".format(config["gpu"]))
+        if config["gpu"] >= 0
+        else torch.device("cpu")
+    )
+    time_str = time.strftime("%Y-%m-%d_%Hh-%Mm-%Ss", time.localtime(time.time()))
     # writer = SummaryWriter(f'runs/{time_str}')
 
-    final_condition_data_path = config['database_path']
-    test_final_condition_data_path = config['test_database_path'] if 'test_database_path' in config else final_condition_data_path
+    final_condition_data_path = config["database_path"]
+    test_final_condition_data_path = (
+        config["test_database_path"]
+        if "test_database_path" in config
+        else final_condition_data_path
+    )
     _, label_dict = load_dataset_label(
-        final_condition_data_path, config['database_name'], use_temperature=config['use_temperature'])
-    test_fps_dict, label_dict = load_test_dataset(test_final_condition_data_path, config['test_database_name'], label_dict = label_dict, use_temperature=config['use_temperature'])
+        final_condition_data_path,
+        config["database_name"],
+        use_temperature=config["use_temperature"],
+    )
+    test_fps_dict, label_dict = load_test_dataset(
+        test_final_condition_data_path,
+        config["test_database_name"],
+        label_dict=label_dict,
+        use_temperature=config["use_temperature"],
+    )
 
     test_dataset = ConditionDataset(
-        fps_dict=test_fps_dict, label_dict=label_dict, dataset='test', use_temperature=config['use_temperature'])
+        fps_dict=test_fps_dict,
+        label_dict=label_dict,
+        dataset="test",
+        use_temperature=config["use_temperature"],
+    )
 
     condition2label = test_dataset.condition2label
     label2condition = test_dataset.label2condition
@@ -456,21 +534,21 @@ if __name__ == '__main__':
     r1_dim = test_dataset.r1_dim
     r2_dim = test_dataset.r2_dim
 
-    config['fp_dim'] = fp_dim
-    config['c1_dim'] = c1_dim
-    config['s1_dim'] = s1_dim
-    config['s2_dim'] = s2_dim
-    config['r1_dim'] = r1_dim
-    config['r2_dim'] = r2_dim
-
+    config["fp_dim"] = fp_dim
+    config["c1_dim"] = c1_dim
+    config["s1_dim"] = s1_dim
+    config["s2_dim"] = s2_dim
+    config["r1_dim"] = r1_dim
+    config["r2_dim"] = r2_dim
 
     test_loader = DataLoader(
-        test_dataset, batch_size=config['batch_size'], shuffle=False)
+        test_dataset, batch_size=config["batch_size"], shuffle=False
+    )
 
     model = RXNConditionModel(
         fp_dim=fp_dim,
-        h_dim=config['h_dim'],
-        dropout_rate=config['dropout_rate'],
+        h_dim=config["h_dim"],
+        dropout_rate=config["dropout_rate"],
         c1_dim=c1_dim,
         s1_dim=s1_dim,
         s2_dim=s2_dim,
@@ -478,33 +556,35 @@ if __name__ == '__main__':
         r2_dim=r2_dim,
         # is_train=True,
     ).to(device)
-    loss_fn_list = [
-        torch.nn.CrossEntropyLoss(),
-        torch.nn.MSELoss()
-    ]
+    loss_fn_list = [torch.nn.CrossEntropyLoss(), torch.nn.MSELoss()]
     # loss_fn = torch.nn.CrossEntropyLoss()
     print(config)
     print(model)
 
-    print('Testing model...')
-    model = load_model(model, os.path.join(
-        config['model_path'], config['model_name']))
+    print("Testing model...")
+    model = load_model(model, os.path.join(config["model_path"], config["model_name"]))
     model = model.to(device)
 
-    
+    caculate_accuracy(
+        model,
+        test_loader,
+        device=device,
+        condition2label=condition2label,
+        topk_rank_thres=config["topk_rank_thres"]
+        if "topk_rank_thres" in config
+        else {
+            "c1": 2,
+            "s1": 3,
+            "s2": 1,
+            "r1": 3,
+            "r2": 1,
+        },
+        save_topk_path=os.path.join(config["model_path"], config["model_name"]),
+        use_temperature=config["use_temperature"],
+        top_fname=config["top_fname"],
+        condition_to_calculate=config["condition_to_calculate"]
+        if "condition_to_calculate" in config
+        else ["c1", "s1", "s2", "r1", "r2"],
+    )
 
-    caculate_accuracy(model,
-                        test_loader,
-                        device=device,
-                        condition2label=condition2label,
-                        topk_rank_thres=config['topk_rank_thres'] if 'topk_rank_thres' in config else {
-                            'c1': 2,
-                            's1': 3,
-                            's2': 1,
-                            'r1': 3,
-                            'r2': 1,
-                        },
-                        save_topk_path=os.path.join(config['model_path'], config['model_name']), use_temperature=config['use_temperature'], top_fname=config['top_fname'],
-                        condition_to_calculate=config['condition_to_calculate'] if 'condition_to_calculate' in config else ['c1', 's1', 's2', 'r1', 'r2'])
-
-        # writer.close()
+    # writer.close()
