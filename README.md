@@ -238,9 +238,10 @@ Training in the Reaxy-TotalSyn-Condition dataset:
 Test in the USPTO-Condition dataset:
 
 - Parrot-ML-E
-  `    python test_parrot_model.py --gpu CUDA_ID \
+  ```
+  python test_parrot_model.py --gpu CUDA_ID \
                                 --config_path configs/config_uspto_condition_aug_n5_lr_low.yaml
-   `
+  ```
   Test in the Reaxy-TotalSyn-Condition dataset:
 - Parrot-RCM
   ```

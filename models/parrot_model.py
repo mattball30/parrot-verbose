@@ -1,24 +1,30 @@
-import pickle
-from dataclasses import asdict
 import logging
 import math
 import os
+import pickle
 import random
 import warnings
+from collections import defaultdict
+from dataclasses import asdict
+from queue import Queue
 
 import numpy as np
 import pandas as pd
-from queue import Queue
-from collections import defaultdict
 import torch
+import yaml
+from rxnfp.models import SmilesClassificationModel, SmilesTokenizer
+from simpletransformers.classification.classification_model import (
+    MODELS_WITHOUT_CLASS_WEIGHTS_SUPPORT,
+    MODELS_WITHOUT_SLIDING_WINDOW_SUPPORT,
+)
+from simpletransformers.classification.classification_utils import ClassificationDataset
+from simpletransformers.config.model_args import ClassificationArgs
+from tensorboardX import SummaryWriter
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from rxnfp.models import SmilesClassificationModel, SmilesTokenizer
 from torch.nn.modules.normalization import LayerNorm
-from tensorboardX import SummaryWriter
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm.auto import tqdm, trange
-from tqdm.contrib import tenumerate
 from transformers import (
     Adafactor,
     AdamW,
@@ -31,25 +37,15 @@ from transformers import (
     get_linear_schedule_with_warmup,
     get_polynomial_decay_schedule_with_warmup,
 )
-from simpletransformers.config.model_args import ClassificationArgs
 from transformers.models.bert.configuration_bert import BertConfig
 from transformers.models.bert.modeling_bert import BertModel
-from simpletransformers.classification.classification_model import (
-    MODELS_WITHOUT_SLIDING_WINDOW_SUPPORT,
-    MODELS_WITHOUT_CLASS_WEIGHTS_SUPPORT,
-)
-from simpletransformers.classification.classification_utils import (
-    ClassificationDataset,
-)
-import yaml
 
 from models.model_layer import (
     PositionalEncoding,
     TokenEmbedding,
-    TransformerDecoderLayer,
     TransformerDecoder,
+    TransformerDecoderLayer,
 )
-
 from models.utils import (
     ConditionWithTempDataset,
     analyze_subgraph_attention_with_condition,
@@ -71,7 +67,6 @@ BOS, EOS, PAD, MASK = "[BOS]", "[EOS]", "[PAD]", "[MASK]"
 
 
 class ParrotConditionModel(BertForSequenceClassification):
-
     def __init__(
         self,
         config,
@@ -220,7 +215,6 @@ class ParrotConditionModel(BertForSequenceClassification):
 
 
 class ParrotConditionPredictionModel(SmilesClassificationModel):
-
     def __init__(
         self,
         model_type,
@@ -237,7 +231,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         # decoder_args=None,
         **kwargs,
     ):
-
         MODEL_CLASSES = {
             "bert": (BertConfig, ParrotConditionModel, SmilesTokenizer),
         }
@@ -407,7 +400,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 normalization=True,
                 **kwargs,
             )
-        elif not self.args.vocab_path and not tokenizer_name in [
+        elif not self.args.vocab_path and tokenizer_name not in [
             "vinai/bertweet-base",
             "vinai/bertweet-covid19-base-cased",
             "vinai/bertweet-covid19-base-uncased",
@@ -472,7 +465,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         verbose=True,
         silent=False,
     ):
-
         process_count = self.args.process_count
 
         tokenizer = self.tokenizer
@@ -603,7 +595,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         verbose=True,
         **kwargs,
     ):
-
         model = self.model
         args = self.args
 
@@ -1259,7 +1250,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         wandb_log=True,
         **kwargs,
     ):
-
         model = self.model
         args = self.args
         eval_output_dir = output_dir
@@ -1270,6 +1260,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             eval_df["text"].astype(str).tolist(),
             eval_df["labels"].tolist(),
         )
+
         os.makedirs(eval_output_dir, exist_ok=True)
         eval_dataset = self.load_and_cache_examples(
             eval_examples, evaluate=True, verbose=verbose, silent=silent, no_cache=True
@@ -1304,7 +1295,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
                 desc="Running Evaluation",
             )
         ):
-
             with torch.no_grad():
                 inputs = self._get_inputs_dict(batch)
                 if self.args.fp16:
@@ -1621,7 +1611,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         topk_get=[1, 3, 5, 10, 15],
         condition_to_calculate=["c1", "s1", "s2", "r1", "r2"],
     ):
-
         condition_item2cols = {"c1": 0, "s1": 1, "s2": 2, "r1": 3, "r2": 4}
 
         calculate_cols = [condition_item2cols[x] for x in condition_to_calculate]
@@ -1727,7 +1716,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         model.eval()
         if self.args.fp16:
-            from torch.cuda import amp
+            pass
         pred_conditions = []
         gt_temperatures = []
         pred_temperatures = []
@@ -1921,7 +1910,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
         model.eval()
         if self.args.fp16:
-            from torch.cuda import amp
+            pass
         pred_conditions = []
         gt_temperatures = []
         pred_temperatures = []
@@ -1969,7 +1958,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             scores_list = [scores[:, i].tolist() for i in range(scores.size(1))]
 
             if calculate_topk_accuracy:
-
                 tgt_tokens_list_supercls = []
 
                 def change_token_idx(token, map_dict):
@@ -2158,8 +2146,7 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         show_attention_fig=False,
         mean_attn=False,
     ):
-        from models.utils import condition_bert_head_view
-        from models.utils import condition_bert_head_heatmap
+        from models.utils import condition_bert_head_heatmap, condition_bert_head_view
 
         predicted_conditions, attention_weights, input_tokens = (
             self.greedy_search_one_sample_with_attn(rxn)
@@ -2221,7 +2208,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
         silent=False,
         block_encoder_self_attn=False,
     ):
-
         self._move_model_to_device()
         model = self.model
         args = self.args
@@ -2382,7 +2368,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             total=len(input_tokens_list),
             disable=silent,
         ):
-
             cross_attention_weights = cross_attention_weights[
                 :, :, :, : len(input_tokens) + 2
             ]
@@ -2408,7 +2393,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             total=len(input_tokens_list),
             disable=silent,
         ):
-
             self_attention_weights = self_attention_weights[
                 :, :, : len(input_tokens) + 2, : len(input_tokens) + 2
             ]
@@ -2423,7 +2407,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             total=len(input_tokens_list),
             disable=silent,
         ):
-
             self_attention_weights = self_attention_weights.numpy()
             self_attention_weights = self_attention_weights[:, :, :, :]
 
@@ -2500,7 +2483,6 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
 
 
 if __name__ == "__main__":
-
     config_file = "./data/bert_condition_data/config_debug.yaml"
     print_args(config_file)
     config = yaml.load(open(config_file, "r"), Loader=yaml.FullLoader)
