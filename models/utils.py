@@ -92,6 +92,7 @@ def get_output_results(
         one_df = one_df.round(5)
         output_df = output_df.append(one_df)
         output_results.append(one_df)
+
     if output_dataframe:
         output_df = output_df.reset_index(drop=True)
         return output_df

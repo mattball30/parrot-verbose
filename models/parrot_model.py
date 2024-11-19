@@ -1813,16 +1813,24 @@ class ParrotConditionPredictionModel(SmilesClassificationModel):
             columns = [
                 "canonical_rxn",
                 "pred_number",
-                "gt_conditions",
-                "pred_conditions",
+                "catalyst1",
+                "solvent1",
+                "solvent2",
+                "reagent1",
+                "reagent2",
+                "pred_catalyst1",
+                "pred_solvent1",
+                "pred_solvent2",
+                "pred_reagent1",
+                "pred_reagent2",
             ]
 
             rows = [
                 [
                     canonical_rxns[i],
                     nth_prediction + 1,
-                    ",".join(gt_conditions[i]),
-                    ",".join(pred_conditions[i][nth_prediction][0]),
+                    *gt_conditions[i],
+                    *pred_conditions[i][nth_prediction][0],
                 ]
                 for i in tqdm(
                     range(len(pred_conditions)), desc="Writing verbose output"
