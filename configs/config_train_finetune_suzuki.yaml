@@ -8,14 +8,14 @@ model_args:
   manual_seed: 42
   max_seq_length: 512
   num_train_epochs: 100
-  pretrained_path: ./outputs/Parrot_train_in_USPTO_Condition_enhance/Parrot_train_in_USPTO_Condition_enhance/
-  output_dir: ./out/parrot_retrain_on_suzuki_with_val
-  best_model_dir: ./outputs/parrot_retrain_on_suzuki_with_val
+  pretrained_path: ./outputs/best_uspto_condition/Parrot_train_in_USPTO_Condition_enhance/
+  output_dir: ./out/finetune_on_suzuki
+  best_model_dir: ./outputs/finetune_on_suzuki
   overwrite_output_dir: true
   regression: false
   thread_count: 8
   train_batch_size: 64
-  wandb_project: Parrot_train_in_USPTO_Condition
+  wandb_project: parrot_finetune_on_suzuki
   warmup_ratio: 0.05
   decoder_args:
     d_model: 256
@@ -27,11 +27,11 @@ model_args:
 
 dataset_args:
   use_temperature: false
-  dataset_root: dataset/source_dataset/suzuki
+  dataset_root: dataset/source_dataset/uspto_suzuki
   database_fname: suzuki_cleaned.csv
 testset_args:
   testset_distinguish_catalyst: false
-  topk_results_fname: suzuki_retrain_topk_accuracy.csv
+  topk_results_fname: finetune_on_suzuki_topk_accuracy.csv
   beam:   # effective when testset_distinguish_catalyst=false
     0: 1  # c1
     1: 3  # s1

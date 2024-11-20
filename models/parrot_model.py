@@ -54,7 +54,9 @@ from models.utils import (
     viz_attention_reaction,
 )
 
+logging.basicConfig()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 try:
     import wandb

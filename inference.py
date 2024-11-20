@@ -1,11 +1,11 @@
 from argparse import ArgumentParser
-import json
+
 import pandas as pd
 import torch
 import yaml
 from pandarallel import pandarallel
+
 from models.parrot_model import ParrotConditionPredictionModel
-from preprocess_script.uspto_script.utils import canonicalize_smiles
 from models.utils import caonicalize_rxn_smiles, get_output_results, inference_load
 
 torch.multiprocessing.set_sharing_strategy("file_system")
@@ -83,8 +83,7 @@ def main(parser_args, debug=False):
 
 
 if __name__ == "__main__":
-
-    parser = ArgumentParser("Test Arguements")
+    parser = ArgumentParser("Test Arguments")
     parser.add_argument("--gpu", default=0, help="GPU device to use", type=int)
     parser.add_argument(
         "--config_path",
@@ -110,5 +109,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_workers", default=10, help="number workers", type=int)
 
+    parser_args = parser.parse_args()
+    main(parser_args, debug=False)
     parser_args = parser.parse_args()
     main(parser_args, debug=False)

@@ -15,8 +15,10 @@
 *.pth
 *.xlsx
 *.log
-out
 outputs/*
+!out/*/*.csv
+!out/*/*.json
+!out/*/*.txt
 !outputs/.keep
 cache_dir
 wandb
@@ -53,3 +55,4 @@ configs/config_inference_use_uspto_rcm.yaml
 configs/config_inference_use_uspto_default.yaml
 analysis_script/attn_viz_default
 analysis_script/attn_viz_rcm
+dataset/source_dataset/*
