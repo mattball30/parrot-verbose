@@ -1,15 +1,18 @@
-A minor fork of Parrot, with a small change to allow the verbose output of the different predicted conditions at test time.
+A minor fork of Parrot, with a small change to allow the verbose output of the different predicted conditions when testing.
 
 ```
     python test_parrot_model.py --gpu CUDA_ID \
-                                --config_path configs/config_uspto_condition_aug_n5_lr_low.yaml \
+                                --config_path configs/{config_name} \
                                 --verbose_output
 ```
 
 Will test Parrot as before, but will create an extra csv at Parrot/outputs/Parrot_train_in_USPTO_Condition_enhance/verbose_output.csv
 
-This CSV contains information on the canonical_rxn being predicted, the ground truth conditions as a single string separated by ',',
-and the predicted conditions as a single string separated by ','.
+This CSV contains information on the canonical_rxn being predicted, the ground truth conditions as in the original dataframe, and the prediction conditions as columns with 'pred_{condition}' as column names. This is a minor change to the code, rather than having to run inference to get the predicted conditions back.
+
+See [here](./notebooks/prepare_data.ipynb) for a tutorial on generating the Suzuki dataset, the relevant configs can be found in the `configs` directory and trained models can be found in the `out` directory. 
+
+All other details about Parrot are the same as the [original repo](https://github.com/wangxr0526/Parrot), see below:
 
 # Parrot
 
