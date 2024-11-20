@@ -15,10 +15,10 @@
 *.pth
 *.xlsx
 *.log
-outputs/*
 !out/*/*.csv
 !out/*/*.json
 !out/*/*.txt
+outputs/*
 !outputs/.keep
 cache_dir
 wandb
@@ -27,6 +27,7 @@ runs
 web_app/static/rxn_fig/*svg
 web_app/static/table/*csv
 dataset/source_dataset/uspto_org_xml
+!dataset/source_dataset/uspto_suzuki/uspto_condition_valid_suzuki_no_rc.csv
 !paper_data/USPTO_condition_frag_analysis_results/*
 !preprocess_script/*.txt
 !preprocess_script/reaxys_script/qurey_file.zip
@@ -55,4 +56,3 @@ configs/config_inference_use_uspto_rcm.yaml
 configs/config_inference_use_uspto_default.yaml
 analysis_script/attn_viz_default
 analysis_script/attn_viz_rcm
-dataset/source_dataset/*
